@@ -19,6 +19,9 @@
 
 import json
 
+from dataset.markmywords.generation_prompts import raw_prompts
+from dataset.markmywords.generation_prompts_train import get_random_prompts
+
 
 class BaseDataset:
     """Base class for dataset."""
@@ -144,6 +147,31 @@ class HumanEvalDataset(BaseDataset):
 
             self.prompts.append(prompt)
             self.references.append({'task': prompt, 'test': item['test'], 'entry_point': item['entry_point']})
+
+class MarkMyWordsDataset(BaseDataset):
+    """Dataset class for MarkMyWords dataset."""
+
+    def __init__(self, tokenizer, max_samples: int = 200, dataset="eval") -> None:
+        """
+            Initialize the MarkMyWords dataset.
+        """
+        super().__init__(max_samples)
+        self.max_samples = min(max_samples, len(raw_prompts))
+        if dataset == "eval":
+            self.raw_prompts = raw_prompts[:self.max_samples]
+        else:
+            self.raw_prompts = get_random_prompts(num_prompts=self.max_samples)
+        self.prompts = [
+            tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for prompt, system_prompt in self.raw_prompts
+        ]
 
 
 if __name__ == '__main__':
