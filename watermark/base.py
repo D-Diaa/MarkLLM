@@ -27,24 +27,38 @@ class BaseWatermark:
     def __init__(self, algorithm_config: str, transformers_config: TransformersConfig, *args, **kwargs) -> None:
         pass
 
-    def generate_watermarked_text(self, prompt: str, *args, **kwargs) -> str: 
+    def generate_watermarked_text(self, prompt: str, *args, **kwargs) -> str:
         pass
 
     def generate_unwatermarked_text(self, prompt: str, *args, **kwargs) -> str:
         """Generate unwatermarked text."""
-        
+
         # Encode prompt
-        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(self.config.device)
+        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(
+            self.config.device)
         # Generate unwatermarked text
         encoded_unwatermarked_text = self.config.generation_model.generate(**encoded_prompt, **self.config.gen_kwargs)
         # Decode
-        unwatermarked_text = self.config.generation_tokenizer.batch_decode(encoded_unwatermarked_text, skip_special_tokens=True)[0]
+        unwatermarked_text = \
+            self.config.generation_tokenizer.batch_decode(encoded_unwatermarked_text, skip_special_tokens=True)[0]
         return unwatermarked_text
 
-    def detect_watermark(self, text:str, return_dict: bool=True, *args, **kwargs) -> Union[tuple, dict]:
+    def generate_watermarked_texts(self, prompts: list, *args, **kwargs) -> list:
+        return [self.generate_watermarked_text(prompt, *args, **kwargs) for prompt in prompts]
+
+    def generate_unwatermarked_texts(self, prompts: list, *args, **kwargs) -> list:
+        # encode prompts
+        encoded_prompts = self.config.generation_tokenizer(prompts, return_tensors="pt", padding=True,
+                                                           add_special_tokens=True).to(self.config.device)
+        # generate unwatermarked texts
+        encoded_unwatermarked_texts = self.config.generation_model.generate(**encoded_prompts, **self.config.gen_kwargs)
+        # decode
+        unwatermarked_texts = self.config.generation_tokenizer.batch_decode(encoded_unwatermarked_texts,
+                                                                            skip_special_tokens=True)
+        return unwatermarked_texts
+
+    def detect_watermark(self, text: str, return_dict: bool = True, *args, **kwargs) -> Union[tuple, dict]:
         pass
 
     def get_data_for_visualize(self, text, *args, **kwargs) -> DataForVisualization:
         pass
-
-

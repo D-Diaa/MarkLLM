@@ -34,7 +34,8 @@ from .detector import get_detector
 class SynthIDConfig:
     """Config class for Default Watermark algorithm, load config file and initialize parameters."""
 
-    def __init__(self, algorithm_config: str = None, transformers_config: TransformersConfig = None, *args, **kwargs) -> None:
+    def __init__(self, algorithm_config: str = None, transformers_config: TransformersConfig = None, *args,
+                 **kwargs) -> None:
         """
         Initialize the Default Watermark configuration.
 
@@ -57,7 +58,7 @@ class SynthIDConfig:
         self.context_history_size = config_dict['context_history_size']
         self.detector_name = config_dict['detector_type']
         self.threshold = config_dict['threshold']
-        
+
         # Model configuration
         self.generation_model = transformers_config.model
         self.generation_tokenizer = transformers_config.tokenizer
@@ -66,7 +67,7 @@ class SynthIDConfig:
         self.gen_kwargs = transformers_config.gen_kwargs
         self.top_k = getattr(transformers_config, 'top_k', -1)
         self.temperature = getattr(transformers_config, 'temperature', 0.7)
-        
+
 
 class SynthIDUtils:
     """Utility class for SynthID algorithm, contains helper functions."""
@@ -75,13 +76,13 @@ class SynthIDUtils:
         self.config = config
         self.rng = torch.Generator(device=self.config.device)
         self.rng.manual_seed(self.config.sampling_table_seed)
-        
+
     def accumulate_hash(
-        self,
-        current_hash: torch.LongTensor,
-        data: torch.LongTensor,
-        multiplier: int = 6364136223846793005,
-        increment: int = 1,
+            self,
+            current_hash: torch.LongTensor,
+            data: torch.LongTensor,
+            multiplier: int = 6364136223846793005,
+            increment: int = 1,
     ) -> torch.LongTensor:
         """Accumulate hash of data on current hash.
 
@@ -109,9 +110,9 @@ class SynthIDUtils:
         return current_hash
 
     def update_scores(
-        self,
-        scores: torch.FloatTensor,
-        g_values: torch.FloatTensor,
+            self,
+            scores: torch.FloatTensor,
+            g_values: torch.FloatTensor,
     ) -> torch.FloatTensor:
         """Updates scores using the g values.
 
@@ -140,10 +141,10 @@ class SynthIDUtils:
         return log_probs
 
     def update_scores_distortionary(
-        self,
-        scores: torch.FloatTensor,
-        g_values: torch.FloatTensor,
-        num_leaves: int,
+            self,
+            scores: torch.FloatTensor,
+            g_values: torch.FloatTensor,
+            num_leaves: int,
     ) -> torch.FloatTensor:
         """Update scores using the g values for distortionary tournament watermarking.
 
@@ -164,8 +165,8 @@ class SynthIDUtils:
         for i in range(depth):
             g_values_at_depth = g_values[:, :, i]
             g_mass_at_depth = (g_values_at_depth * probs).sum(axis=1, keepdims=True)
-            coeff_not_in_g = (1 - g_mass_at_depth)**(num_leaves - 1)
-            coeff_in_g = (1 - (1 - g_mass_at_depth)**(num_leaves)) / g_mass_at_depth
+            coeff_not_in_g = (1 - g_mass_at_depth) ** (num_leaves - 1)
+            coeff_in_g = (1 - (1 - g_mass_at_depth) ** (num_leaves)) / g_mass_at_depth
             coeffs = torch.where(
                 torch.logical_and(g_values_at_depth == 1, probs > 0),
                 coeff_in_g, coeff_not_in_g)
@@ -176,8 +177,8 @@ class SynthIDUtils:
             torch.isfinite(log_probs), log_probs, torch.tensor(-1e12, device=device)
         )
         return log_probs
-    
-    def mean_score_numpy(self,g_values, mask):
+
+    def mean_score_numpy(self, g_values, mask):
         """
         Args:
             g_values: shape [batch_size, seq_len, watermarking_depth]
@@ -190,12 +191,12 @@ class SynthIDUtils:
         return np.sum(g_values * np.expand_dims(mask, 2), axis=(1, 2)) / (
                 watermarking_depth * num_unmasked
         )
-    
+
     def weighted_mean_score_numpy(
-        self,
-        g_values: np.ndarray,
-        mask: np.ndarray,
-        weights: np.ndarray = None,
+            self,
+            g_values: np.ndarray,
+            mask: np.ndarray,
+            weights: np.ndarray = None,
     ) -> np.ndarray:
         """Computes the Weighted Mean score.
 
@@ -224,21 +225,21 @@ class SynthIDUtils:
 
         num_unmasked = np.sum(mask, axis=1)  # shape [batch_size]
         return np.sum(g_values * np.expand_dims(mask, 2), axis=(1, 2)) / (
-            watermarking_depth * num_unmasked
+                watermarking_depth * num_unmasked
         )
 
 
 class SynthIDState:
-  """SynthID watermarking state."""
+    """SynthID watermarking state."""
 
-  def __init__(
-      self,
-      batch_size: int,
-      ngram_len: int,
-      context_history_size: int,
-      device: torch.device,
-  ):
-    """Initializes the state.
+    def __init__(
+            self,
+            batch_size: int,
+            ngram_len: int,
+            context_history_size: int,
+            device: torch.device,
+    ):
+        """Initializes the state.
 
     Args:
       batch_size: Batch size.
@@ -246,17 +247,17 @@ class SynthIDState:
       context_history_size: Size of the tensor to keep track of seen contexts.
       device: Device to use.
     """
-    self.context = torch.zeros(
-        (batch_size, ngram_len - 1),
-        dtype=torch.int64,
-        device=device,
-    )
-    self.context_history = torch.zeros(
-        (batch_size, context_history_size),
-        dtype=torch.int64,
-        device=device,
-    )
-    self.num_calls = 0
+        self.context = torch.zeros(
+            (batch_size, ngram_len - 1),
+            dtype=torch.int64,
+            device=device,
+        )
+        self.context_history = torch.zeros(
+            (batch_size, context_history_size),
+            dtype=torch.int64,
+            device=device,
+        )
+        self.num_calls = 0
 
 
 class SynthIDLogitsProcessor(LogitsProcessor):
@@ -266,14 +267,14 @@ class SynthIDLogitsProcessor(LogitsProcessor):
         self.config = config
         self.utils = utils
         self.state = None
-        
+
         # Initialize parameters from config
         self.ngram_len = config.ngram_len
         self.keys = torch.tensor(config.keys, device=config.device)
         self.sampling_table_size = config.sampling_table_size
         self.context_history_size = config.context_history_size
         self.device = config.device
-        
+
         # Initialize sampling table
         self.sampling_table = torch.randint(
             low=0,
@@ -301,58 +302,59 @@ class SynthIDLogitsProcessor(LogitsProcessor):
                 torch.arange(vocab_size, device=self.device)
                 for _ in range(batch_size)
             ])
-        
-        
-        if self.state is None:
+
+        if self.state is None or self.state["context"].shape[0] != batch_size:
             self.state = {
                 "context": torch.zeros((batch_size, self.ngram_len - 1), dtype=torch.int64, device=self.device),
-                "context_history": torch.zeros((batch_size, self.context_history_size), dtype=torch.int64, device=self.device),
+                "context_history": torch.zeros((batch_size, self.context_history_size), dtype=torch.int64,
+                                               device=self.device),
                 "num_calls": 0
             }
-        
+
         # Update context with last input token
         if self.state["num_calls"] > 0:
             self.state["context"] = torch.cat((self.state["context"], input_ids[:, -1:]), dim=1)
             self.state["context"] = self.state["context"][:, 1:]
-        
+
         self.state["num_calls"] += 1
-        
+
         # Generate ngram keys and sample g values
         ngram_keys, hash_context = self._compute_keys(self.state["context"], top_k_indices)
         g_values = self.sample_g_values(ngram_keys)
-        
+
         # Update scores based on g values
         updated_scores = self.utils.update_scores(scores_top_k, g_values)
-        
+
         # Check for repeated context
         hash_context = hash_context[:, None]
         is_repeated = (self.state["context_history"] == hash_context).any(dim=1, keepdim=True)
-        
+
         # Update context history
         self.state["context_history"] = torch.cat((hash_context, self.state["context_history"]), dim=1)[:, :-1]
-        
+
         # Return original scores if context is repeated, otherwise return updated scores
         return torch.where(is_repeated, scores, updated_scores)
 
-    def _compute_keys(self, context: torch.LongTensor, top_k_indices: torch.LongTensor) -> tuple[torch.LongTensor, torch.LongTensor]:
+    def _compute_keys(self, context: torch.LongTensor, top_k_indices: torch.LongTensor) -> tuple[
+        torch.LongTensor, torch.LongTensor]:
         """Compute ngram keys for given context and possible next tokens."""
         batch_size = context.shape[0]
-        
+
         # Initial hash of context
         hash_result = torch.ones(batch_size, device=self.device, dtype=torch.long)
         hash_context = self.utils.accumulate_hash(hash_result, context)
-        
+
         # Compute hash for each possible continuation
         hash_result = torch.vmap(self.utils.accumulate_hash, in_dims=(None, 1), out_dims=1)(
             hash_context, top_k_indices[:, :, None]
         )
-        
+
         # Add watermarking keys
         keys = self.keys[None, None, :, None]
         hash_result = torch.vmap(self.utils.accumulate_hash, in_dims=(None, 2), out_dims=2)(
             hash_result, keys
         )
-        
+
         return hash_result, hash_context
 
     def sample_g_values(self, ngram_keys: torch.LongTensor) -> torch.LongTensor:
@@ -360,10 +362,10 @@ class SynthIDLogitsProcessor(LogitsProcessor):
         ngram_keys = ngram_keys % self.sampling_table_size
         sampling_table = self.sampling_table.reshape((1, 1, self.sampling_table_size))
         return torch.take_along_dim(sampling_table, indices=ngram_keys, dim=2)
-    
+
     def compute_g_values(
-        self,
-        input_ids: torch.LongTensor,
+            self,
+            input_ids: torch.LongTensor,
     ) -> torch.LongTensor:
         """Computes g values for each ngram from the given sequence of tokens.
 
@@ -372,14 +374,14 @@ class SynthIDLogitsProcessor(LogitsProcessor):
 
         Returns:
             G values (batch_size, input_len - (ngram_len - 1), depth).
-        """ 
+        """
         ngrams = input_ids.unfold(dimension=1, size=self.ngram_len, step=1)
         ngram_keys = self.compute_ngram_keys(ngrams)
         return self.sample_g_values(ngram_keys)
-    
+
     def compute_ngram_keys(
-      self,
-        ngrams: torch.LongTensor,
+            self,
+            ngrams: torch.LongTensor,
     ) -> torch.LongTensor:
         """Computes random keys for each ngram and depth.
 
@@ -393,7 +395,7 @@ class SynthIDLogitsProcessor(LogitsProcessor):
             raise ValueError(
                 "Ngrams should be of shape (batch_size, num_ngrams, ngram_len), but"
                 f" is {ngrams.shape}"
-        )
+            )
         if ngrams.shape[2] != self.ngram_len:
             raise ValueError(
                 "Ngrams should be of shape (batch_size, num_ngrams, ngram_len),"
@@ -420,9 +422,9 @@ class SynthIDLogitsProcessor(LogitsProcessor):
         return hash_result
 
     def compute_eos_token_mask(
-        self,
-        input_ids: torch.LongTensor,
-        eos_token_id: int,
+            self,
+            input_ids: torch.LongTensor,
+            eos_token_id: int,
     ) -> torch.LongTensor:
         """Computes repetitions mask.
 
@@ -446,8 +448,8 @@ class SynthIDLogitsProcessor(LogitsProcessor):
         return torch.stack(noneos_masks, dim=0)
 
     def compute_context_repetition_mask(
-        self,
-        input_ids: torch.LongTensor,
+            self,
+            input_ids: torch.LongTensor,
     ) -> torch.LongTensor:
         """Computes repetition mask.
 
@@ -478,8 +480,8 @@ class SynthIDLogitsProcessor(LogitsProcessor):
             context = contexts[:, i, :]
             hash_result = torch.ones(batch_size, device=self.device, dtype=torch.long)
             context_hash = self.utils.accumulate_hash(hash_result, context)[
-                :, None
-            ]
+                           :, None
+                           ]
             is_repeated_context = (state.context_history == context_hash).any(
                 dim=1,
                 keepdim=True,
@@ -494,7 +496,6 @@ class SynthIDLogitsProcessor(LogitsProcessor):
         return torch.logical_not(are_repeated_contexts)
 
 
-
 class SynthID(BaseWatermark):
     """Top-level class for SynthID algorithm."""
 
@@ -503,20 +504,37 @@ class SynthID(BaseWatermark):
         self.utils = SynthIDUtils(self.config)
         self.logits_processor = SynthIDLogitsProcessor(self.config, self.utils)
         self.detector = get_detector(self.config.detector_name, self.logits_processor)
-    
+
     def generate_watermarked_text(self, prompt: str, *args, **kwargs) -> str:
         """Generate watermarked text."""
         generate_with_watermark = partial(
             self.config.generation_model.generate,
-            logits_processor=LogitsProcessorList([self.logits_processor]), 
+            logits_processor=LogitsProcessorList([self.logits_processor]),
             **self.config.gen_kwargs
         )
         
-        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(self.config.device)
+        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True, padding=True).to(self.config.device)
         encoded_watermarked_text = generate_with_watermark(**encoded_prompt)
         watermarked_text = self.config.generation_tokenizer.batch_decode(encoded_watermarked_text, skip_special_tokens=True)[0]
         return watermarked_text
-    
+
+    def generate_watermarked_texts(self, prompts: list, *args, **kwargs) -> list:
+        # Configure generate_with_watermark
+        generate_with_watermark = partial(
+            self.config.generation_model.generate,
+            logits_processor=LogitsProcessorList([self.logits_processor]),
+            **self.config.gen_kwargs
+        )
+        # encode prompts
+        encoded_prompts = self.config.generation_tokenizer(prompts, return_tensors="pt", padding=True,
+                                                           add_special_tokens=True).to(self.config.device)
+        # generate watermarked texts
+        encoded_watermarked_texts = generate_with_watermark(**encoded_prompts)
+        # decode
+        watermarked_texts = self.config.generation_tokenizer.batch_decode(encoded_watermarked_texts,
+                                                                          skip_special_tokens=True)
+        return watermarked_texts
+
     def detect_watermark(self, text: str, return_dict: bool = True, *args, **kwargs):
         """Detect watermark in the text.
         
@@ -529,53 +547,55 @@ class SynthID(BaseWatermark):
         """
         # Encode text to token ids
         encoded_text = self.config.generation_tokenizer(
-            text, 
-            return_tensors="pt", 
+            text,
+            return_tensors="pt",
             add_special_tokens=False
         )["input_ids"].to(self.config.device)
-        
+
         # Compute g-values for the text
         g_values = self.logits_processor.compute_g_values(encoded_text)
-        
+
         # Create eos mask
         eos_mask = self.logits_processor.compute_eos_token_mask(
             input_ids=encoded_text,
             eos_token_id=self.config.generation_tokenizer.eos_token_id
         )[:, self.config.ngram_len - 1:]
-        
+
         # Compute context repetition mask
         context_repetition_mask = self.logits_processor.compute_context_repetition_mask(
             input_ids=encoded_text
         )
-        
+
         # Combine masks
         combined_mask = context_repetition_mask * eos_mask
-        
+
         # Calculate mean score
         g_values_np = g_values.cpu().numpy()
         mask_np = combined_mask.cpu().numpy()
         score = self.detector.detect(g_values_np, mask_np)[0]  # Take first element as we have batch_size=1
-    
+
         # Determine if text is watermarked based on score
         # A positive score indicates watermarking
         is_watermarked = score > self.config.threshold
-        
+
         if return_dict:
             return {"is_watermarked": bool(is_watermarked), "score": float(score)}
         else:
             return (is_watermarked, float(score))
-        
+
     def get_data_for_visualization(self, text: str, *args, **kwargs) -> DataForVisualization:
         """Get data for visualization."""
-        encoded_text = self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(self.config.device)
-        
+        encoded_text = \
+        self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(
+            self.config.device)
+
         # Placeholder for visualization data generation
         decoded_tokens = []
         highlight_values = []
-        
+
         for token_id in encoded_text:
             token = self.config.generation_tokenizer.decode(token_id.item())
             decoded_tokens.append(token)
             highlight_values.append(0)  # Placeholder values
-        
+
         return DataForVisualization(decoded_tokens, highlight_values)

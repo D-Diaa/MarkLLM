@@ -12,20 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import partial
+from math import sqrt
+
 # ==============================================
 # sweet.py
 # Description: Implementation of SWEET algorithm
 # ==============================================
 import torch
-from math import sqrt
-
-from functools import partial
-from ..base import BaseWatermark
-from utils.utils import load_config_file
-from utils.transformers_config import TransformersConfig
-from exceptions.exceptions import AlgorithmNameMismatchError
 from transformers import LogitsProcessor, LogitsProcessorList
+
+from exceptions.exceptions import AlgorithmNameMismatchError
+from utils.transformers_config import TransformersConfig
+from utils.utils import load_config_file
 from visualize.data_for_visualization import DataForVisualization
+from ..base import BaseWatermark
 
 
 class SWEETConfig:
@@ -45,14 +46,14 @@ class SWEETConfig:
             config_dict = load_config_file(algorithm_config)
         if config_dict['algorithm_name'] != 'SWEET':
             raise AlgorithmNameMismatchError('SWEET', config_dict['algorithm_name'])
-        
+
         self.gamma = config_dict['gamma']
         self.delta = config_dict['delta']
         self.hash_key = config_dict['hash_key']
         self.z_threshold = config_dict['z_threshold']
         self.prefix_length = config_dict['prefix_length']
         self.entropy_threshold = config_dict['entropy_threshold']
-        
+
         self.generation_model = transformers_config.model
         self.generation_tokenizer = transformers_config.tokenizer
         self.vocab_size = transformers_config.vocab_size
@@ -81,9 +82,9 @@ class SWEETUtils:
         self._seed_rng(input_ids)
         greenlist_size = int(self.config.vocab_size * self.config.gamma)
         vocab_permutation = torch.randperm(self.config.vocab_size, device=input_ids.device, generator=self.rng)
-        greenlist_ids = vocab_permutation[:greenlist_size] 
+        greenlist_ids = vocab_permutation[:greenlist_size]
         return greenlist_ids
-    
+
     def calculate_entropy(self, model, tokenized_text: torch.Tensor):
         """Calculate entropy for each token in the tokenized_text."""
         with torch.no_grad():
@@ -94,18 +95,19 @@ class SWEETUtils:
             entropy.insert(0, -10000.0)
             return entropy[:-1]
 
-    def _compute_z_score(self, observed_count: int, T: int) -> float: 
+    def _compute_z_score(self, observed_count: int, T: int) -> float:
         """Compute z-score for the observed count of green tokens."""
         expected_count = self.config.gamma
-        numer = observed_count - expected_count * T 
-        denom = sqrt(T * expected_count * (1 - expected_count))  
+        numer = observed_count - expected_count * T
+        denom = sqrt(T * expected_count * (1 - expected_count))
         z = numer / denom
         return z
 
     def score_sequence(self, input_ids: torch.Tensor, entropy_list: list[float]) -> tuple[float, list[int], list[int]]:
         """Score the input_ids based on the greenlist and entropy."""
-        num_tokens_scored = (len(input_ids) - self.config.prefix_length - 
-                             len([e for e in entropy_list[self.config.prefix_length:] if e <= self.config.entropy_threshold]))
+        num_tokens_scored = (len(input_ids) - self.config.prefix_length -
+                             len([e for e in entropy_list[self.config.prefix_length:] if
+                                  e <= self.config.entropy_threshold]))
         if num_tokens_scored < 1:
             raise ValueError(
                 (
@@ -129,9 +131,10 @@ class SWEETUtils:
                 weights.append(0)
 
         # calculate number of green tokens where weight is 1
-        green_token_count = sum([1 for i in range(len(green_token_flags)) if green_token_flags[i] == 1 and weights[i] == 1])
+        green_token_count = sum(
+            [1 for i in range(len(green_token_flags)) if green_token_flags[i] == 1 and weights[i] == 1])
         z_score = self._compute_z_score(green_token_count, num_tokens_scored)
-        
+
         return z_score, green_token_flags, weights
 
 
@@ -149,7 +152,8 @@ class SWEETLogitsProcessor(LogitsProcessor):
         self.config = config
         self.utils = utils
 
-    def _calc_greenlist_mask(self, scores: torch.FloatTensor, greenlist_token_ids: torch.LongTensor) -> torch.BoolTensor:
+    def _calc_greenlist_mask(self, scores: torch.FloatTensor,
+                             greenlist_token_ids: torch.LongTensor) -> torch.BoolTensor:
         """Calculate greenlist mask for the given scores and greenlist token ids."""
         green_tokens_mask = torch.zeros_like(scores)
         for b_idx in range(len(greenlist_token_ids)):
@@ -157,7 +161,8 @@ class SWEETLogitsProcessor(LogitsProcessor):
         final_mask = green_tokens_mask.bool()
         return final_mask
 
-    def _bias_greenlist_logits(self, scores: torch.Tensor, greenlist_mask: torch.Tensor, greenlist_bias: float) -> torch.Tensor:
+    def _bias_greenlist_logits(self, scores: torch.Tensor, greenlist_mask: torch.Tensor,
+                               greenlist_bias: float) -> torch.Tensor:
         """Bias the scores for the greenlist tokens."""
         scores[greenlist_mask] = scores[greenlist_mask] + greenlist_bias
         return scores
@@ -176,13 +181,14 @@ class SWEETLogitsProcessor(LogitsProcessor):
         green_tokens_mask = self._calc_greenlist_mask(scores=scores, greenlist_token_ids=batched_greenlist_ids)
 
         # get entropy
-        raw_probs = torch.softmax(scores, dim=-1)  
+        raw_probs = torch.softmax(scores, dim=-1)
         ent = -torch.where(raw_probs > 0, raw_probs * raw_probs.log(), raw_probs.new([0.0])).sum(dim=-1)
         entropy_mask = (ent > self.config.entropy_threshold).view(-1, 1)
-        
+
         green_tokens_mask = green_tokens_mask * entropy_mask
 
-        scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask, greenlist_bias=self.config.delta)
+        scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask,
+                                             greenlist_bias=self.config.delta)
         return scores
 
 
@@ -207,27 +213,51 @@ class SWEET(BaseWatermark):
         # Configure generate_with_watermark
         generate_with_watermark = partial(
             self.config.generation_model.generate,
-            logits_processor=LogitsProcessorList([self.logits_processor]), 
+            logits_processor=LogitsProcessorList([self.logits_processor]),
             **self.config.gen_kwargs
         )
-        
+
         # encode prompt
-        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(self.config.device)
+        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(
+            self.config.device)
         # generate watermarked text
         encoded_watermarked_text = generate_with_watermark(**encoded_prompt)
         # decode
-        watermarked_text = self.config.generation_tokenizer.batch_decode(encoded_watermarked_text, skip_special_tokens=True)[0]
+        watermarked_text = \
+        self.config.generation_tokenizer.batch_decode(encoded_watermarked_text, skip_special_tokens=True)[0]
         return watermarked_text
+
+    def generate_watermarked_texts(self, prompts: list[str], *args, **kwargs):
+        # Configure generate_with_watermark
+        generate_with_watermark = partial(
+            self.config.generation_model.generate,
+            logits_processor=LogitsProcessorList([self.logits_processor]),
+            **self.config.gen_kwargs
+        )
+        # encode prompts
+        encoded_prompts = self.config.generation_tokenizer(prompts, return_tensors="pt", add_special_tokens=True).to(
+            self.config.device)
+
+        # generate watermarked texts
+        encoded_watermarked_texts = generate_with_watermark(**encoded_prompts)
+
+        # decode
+        watermarked_texts = self.config.generation_tokenizer.batch_decode(encoded_watermarked_texts,
+                                                                          skip_special_tokens=True)
+
+        return watermarked_texts
 
     def detect_watermark(self, text: str, return_dict: bool = True, *args, **kwargs):
         """Detect watermark in the text."""
 
         # encode text
-        encoded_text = self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(self.config.device)
+        encoded_text = \
+        self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(
+            self.config.device)
 
         # calculate entropy
         entropy_list = self.utils.calculate_entropy(self.config.generation_model, encoded_text)
-        
+
         # compute z_score
         z_score, _, _ = self.utils.score_sequence(encoded_text, entropy_list)
 
@@ -242,20 +272,22 @@ class SWEET(BaseWatermark):
 
     def get_data_for_visualization(self, text: str, *args, **kwargs):
         """Get data for visualization."""
-        
+
         # encode text
-        encoded_text = self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(self.config.generation_model.device)
+        encoded_text = \
+        self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(
+            self.config.generation_model.device)
 
         # calculate entropy
         entropy_list = self.utils.calculate_entropy(self.config.generation_model, encoded_text)
-        
+
         # compute z-score, highlight_values, and weights
         z_score, highlight_values, weights = self.utils.score_sequence(encoded_text, entropy_list)
-        
+
         # decode single tokens
         decoded_tokens = []
         for token_id in encoded_text:
             token = self.config.generation_tokenizer.decode(token_id.item())
             decoded_tokens.append(token)
-        
+
         return DataForVisualization(decoded_tokens, highlight_values, weights)

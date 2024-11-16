@@ -60,6 +60,7 @@ class KGWConfig:
         self.device = transformers_config.device
         self.gen_kwargs = transformers_config.gen_kwargs
 
+
 class KGWUtils:
     """Utility class for KGW algorithm, contains helper functions."""
 
@@ -74,27 +75,28 @@ class KGWUtils:
         self.rng = torch.Generator(device=self.config.device)
         self.rng.manual_seed(self.config.hash_key)
         self.prf = torch.randperm(self.config.vocab_size, device=self.config.device, generator=self.rng)
-        self.f_scheme_map = {"time": self._f_time, "additive": self._f_additive, "skip": self._f_skip, "min": self._f_min}
+        self.f_scheme_map = {"time": self._f_time, "additive": self._f_additive, "skip": self._f_skip,
+                             "min": self._f_min}
         self.window_scheme_map = {"left": self._get_greenlist_ids_left, "self": self._get_greenlist_ids_self}
 
     def _f(self, input_ids: torch.LongTensor) -> int:
         """Get the previous token."""
         return int(self.f_scheme_map[self.config.f_scheme](input_ids))
-    
+
     def _f_time(self, input_ids: torch.LongTensor):
         """Get the previous token time."""
         time_result = 1
         for i in range(0, self.config.prefix_length):
             time_result *= input_ids[-1 - i].item()
         return self.prf[time_result % self.config.vocab_size]
-    
+
     def _f_additive(self, input_ids: torch.LongTensor):
         """Get the previous token additive."""
         additive_result = 0
         for i in range(0, self.config.prefix_length):
             additive_result += input_ids[-1 - i].item()
         return self.prf[additive_result % self.config.vocab_size]
-    
+
     def _f_skip(self, input_ids: torch.LongTensor):
         """Get the previous token skip."""
         return self.prf[input_ids[- self.config.prefix_length].item()]
@@ -102,11 +104,11 @@ class KGWUtils:
     def _f_min(self, input_ids: torch.LongTensor):
         """Get the previous token min."""
         return min(self.prf[input_ids[-1 - i].item()] for i in range(0, self.config.prefix_length))
-    
+
     def get_greenlist_ids(self, input_ids: torch.LongTensor) -> list[int]:
         """Get greenlist ids for the input_ids."""
         return self.window_scheme_map[self.config.window_scheme](input_ids)
-    
+
     def _get_greenlist_ids_left(self, input_ids: torch.LongTensor) -> list[int]:
         """Get greenlist ids for the input_ids via leftHash scheme."""
         self.rng.manual_seed((self.config.hash_key * self._f(input_ids)) % self.config.vocab_size)
@@ -114,7 +116,7 @@ class KGWUtils:
         vocab_permutation = torch.randperm(self.config.vocab_size, device=input_ids.device, generator=self.rng)
         greenlist_ids = vocab_permutation[:greenlist_size]
         return greenlist_ids
-    
+
     def _get_greenlist_ids_self(self, input_ids: torch.LongTensor) -> list[int]:
         """Get greenlist ids for the input_ids via selfHash scheme."""
         greenlist_size = int(self.config.vocab_size * self.config.gamma)
@@ -128,15 +130,15 @@ class KGWUtils:
             if k in temp_greenlist_ids:
                 greenlist_ids.append(k)
         return greenlist_ids
-    
-    def _compute_z_score(self, observed_count: int , T: int) -> float: 
+
+    def _compute_z_score(self, observed_count: int, T: int) -> float:
         """Compute z-score for the given observed count and total tokens."""
         expected_count = self.config.gamma
-        numer = observed_count - expected_count * T 
-        denom = sqrt(T * expected_count * (1 - expected_count))  
+        numer = observed_count - expected_count * T
+        denom = sqrt(T * expected_count * (1 - expected_count))
         z = numer / denom
         return z
-    
+
     def score_sequence(self, input_ids: torch.Tensor) -> tuple[float, list[int]]:
         """Score the input_ids and return z_score and green_token_flags."""
         num_tokens_scored = len(input_ids) - self.config.prefix_length
@@ -159,7 +161,7 @@ class KGWUtils:
                 green_token_flags.append(1)
             else:
                 green_token_flags.append(0)
-        
+
         z_score = self._compute_z_score(green_token_count, num_tokens_scored)
         return z_score, green_token_flags
 
@@ -178,7 +180,8 @@ class KGWLogitsProcessor(LogitsProcessor):
         self.config = config
         self.utils = utils
 
-    def _calc_greenlist_mask(self, scores: torch.FloatTensor, greenlist_token_ids: torch.LongTensor) -> torch.BoolTensor:
+    def _calc_greenlist_mask(self, scores: torch.FloatTensor,
+                             greenlist_token_ids: torch.LongTensor) -> torch.BoolTensor:
         """Calculate greenlist mask for the given scores and greenlist token ids."""
         green_tokens_mask = torch.zeros_like(scores)
         for b_idx in range(len(greenlist_token_ids)):
@@ -186,7 +189,8 @@ class KGWLogitsProcessor(LogitsProcessor):
         final_mask = green_tokens_mask.bool()
         return final_mask
 
-    def _bias_greenlist_logits(self, scores: torch.Tensor, greenlist_mask: torch.Tensor, greenlist_bias: float) -> torch.Tensor:
+    def _bias_greenlist_logits(self, scores: torch.Tensor, greenlist_mask: torch.Tensor,
+                               greenlist_bias: float) -> torch.Tensor:
         """Bias the scores for the greenlist tokens."""
         scores[greenlist_mask] = scores[greenlist_mask] + greenlist_bias
         return scores
@@ -204,9 +208,10 @@ class KGWLogitsProcessor(LogitsProcessor):
 
         green_tokens_mask = self._calc_greenlist_mask(scores=scores, greenlist_token_ids=batched_greenlist_ids)
 
-        scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask, greenlist_bias=self.config.delta)
+        scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask,
+                                             greenlist_bias=self.config.delta)
         return scores
-    
+
 
 class KGW(BaseWatermark):
     """Top-level class for KGW algorithm."""
@@ -222,30 +227,51 @@ class KGW(BaseWatermark):
         self.config = KGWConfig(algorithm_config, transformers_config)
         self.utils = KGWUtils(self.config)
         self.logits_processor = KGWLogitsProcessor(self.config, self.utils)
-    
+
     def generate_watermarked_text(self, prompt: str, *args, **kwargs) -> str:
         """Generate watermarked text."""
 
         # Configure generate_with_watermark
         generate_with_watermark = partial(
             self.config.generation_model.generate,
-            logits_processor=LogitsProcessorList([self.logits_processor]), 
+            logits_processor=LogitsProcessorList([self.logits_processor]),
             **self.config.gen_kwargs
         )
-        
+
         # Encode prompt
-        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(self.config.device)
+        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True,padding=True).to(
+            self.config.device)
         # Generate watermarked text
         encoded_watermarked_text = generate_with_watermark(**encoded_prompt)
         # Decode
-        watermarked_text = self.config.generation_tokenizer.batch_decode(encoded_watermarked_text, skip_special_tokens=True)[0]
+        watermarked_text = \
+        self.config.generation_tokenizer.batch_decode(encoded_watermarked_text, skip_special_tokens=True)[0]
         return watermarked_text
-    
+
+    def generate_watermarked_texts(self, prompts: list, *args, **kwargs) -> list:
+        # Configure generate_with_watermark
+        generate_with_watermark = partial(
+            self.config.generation_model.generate,
+            logits_processor=LogitsProcessorList([self.logits_processor]),
+            **self.config.gen_kwargs
+        )
+        # encode prompts
+        encoded_prompts = self.config.generation_tokenizer(prompts, return_tensors="pt", padding=True,
+                                                           add_special_tokens=True).to(self.config.device)
+        # generate watermarked texts
+        encoded_watermarked_texts = generate_with_watermark(**encoded_prompts)
+        # decode
+        watermarked_texts = self.config.generation_tokenizer.batch_decode(encoded_watermarked_texts,
+                                                                          skip_special_tokens=True)
+        return watermarked_texts
+
     def detect_watermark(self, text: str, return_dict: bool = True, *args, **kwargs):
         """Detect watermark in the text."""
 
         # Encode the text
-        encoded_text = self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(self.config.device)
+        encoded_text = \
+        self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(
+            self.config.device)
 
         # Compute z_score using a utility method
         z_score, _ = self.utils.score_sequence(encoded_text)
@@ -258,20 +284,22 @@ class KGW(BaseWatermark):
             return {"is_watermarked": is_watermarked, "score": z_score}
         else:
             return (is_watermarked, z_score)
-        
+
     def get_data_for_visualization(self, text: str, *args, **kwargs) -> tuple[list[str], list[int]]:
         """Get data for visualization."""
-        
+
         # Encode text
-        encoded_text = self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(self.config.device)
-        
+        encoded_text = \
+        self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(
+            self.config.device)
+
         # Compute z-score and highlight values
         z_score, highlight_values = self.utils.score_sequence(encoded_text)
-        
+
         # decode single tokens
         decoded_tokens = []
         for token_id in encoded_text:
             token = self.config.generation_tokenizer.decode(token_id.item())
             decoded_tokens.append(token)
-        
+
         return DataForVisualization(decoded_tokens, highlight_values)
