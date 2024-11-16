@@ -34,6 +34,7 @@ from exceptions.exceptions import DiversityValueError
 from evaluation.tools.oracle import QualityOracle
 from transformers import T5Tokenizer, T5ForConditionalGeneration, BertTokenizer, BertForMaskedLM
 
+
 class TextEditor:
     """Base class for text editing."""
 
@@ -43,6 +44,10 @@ class TextEditor:
     def edit(self, text: str, reference=None):
         return text
 
+    def edit_batch(self, texts: list, references=None):
+        return [self.edit(text, reference) for text, reference in zip(texts, references)]
+
+
 class RandomWalkAttack(TextEditor):
     """
         Remove the watermark using the random walk attack (https://arxiv.org/abs/2311.04378) via black-box access to a quality oracle and a perturbaiton oracle.
@@ -50,7 +55,7 @@ class RandomWalkAttack(TextEditor):
         (2) Perturbation oracle can modify an output with a nontrivial probability of maintaining quality, 
             and which induces an efficiently mixing random walk on high-quality outputs.
         
-        Examplar Usage: 
+        Example Usage:
         '''
         model_name_or_path="meta-llama/Meta-Llama-3-70B-Instruct"
         model = AutoModelForCausalLM.from_pretrained(model_name_or_path, device_map='auto') 
@@ -66,8 +71,9 @@ class RandomWalkAttack(TextEditor):
         '''
     """
 
-    def __init__(self, perturbation_tokenizer: T5Tokenizer, perturbation_oracle: T5ForConditionalGeneration, quality_oracle: QualityOracle,
-                       device='cuda', total_steps=200, span_len=6, target_valid_steps=100, **kwargs):
+    def __init__(self, perturbation_tokenizer: T5Tokenizer, perturbation_oracle: T5ForConditionalGeneration,
+                 quality_oracle: QualityOracle, device='cuda', total_steps=200, span_len=6, target_valid_steps=100,
+                 **kwargs):
         """
             Parameters:
             perturbation_tokenizer (T5Tokenizer): The tokenizer for the perturbation oracle.
@@ -78,19 +84,20 @@ class RandomWalkAttack(TextEditor):
             total_steps (int): The total number of random walk steps.
             target_valid_steps (int): The target number of valid steps.
         """
+        super().__init__()
         self.perturbation_tokenizer = perturbation_tokenizer
         self.perturbation_oracle = perturbation_oracle.eval()
         self.quality_oracle = quality_oracle
         self.device = device
         self.gen_kwargs = {}
         self.gen_kwargs.update(kwargs)
-        
+
         self.span_len = span_len
         self.total_steps = total_steps
         self.target_valid_steps = target_valid_steps
         if self.quality_oracle.check_quality == 'checker':
             from gramformer import Gramformer
-            self.gf = Gramformer(models = 1, use_gpu=True)
+            self.gf = Gramformer(models=1, use_gpu=True)
 
     def perturb(self, text: str):
         final_input_text = self.mask_text(text)
@@ -122,7 +129,7 @@ class RandomWalkAttack(TextEditor):
 
             candidate_response = self.grammatical_error_correction(candidate_response)
             candidate_response = self.remove_incomplete_sentences(candidate_response)
-            
+
             if self.quality_oracle.maintain_quality(prompt, original_response, candidate_response):
                 cached_response = n_response
                 n_response = candidate_response
@@ -133,13 +140,13 @@ class RandomWalkAttack(TextEditor):
                 patience = 0
             else:
                 patience += 1
-            
+
             if patience > max_attempts:
                 break
             elif patience > backtrack_patience:
                 n_response = cached_response
                 patience = 0
-            
+
             pbar.update(1)
             n_iter += 1
         pbar.close()
@@ -163,7 +170,7 @@ class RandomWalkAttack(TextEditor):
         end = start + self.span_len
         masked_text = ' '.join(words[:start]) + ' <extra_id_0> ' + ' '.join(words[end:])
         return masked_text
-    
+
     def contains_verb(self, sentence):
         words = word_tokenize(sentence)
         tagged_words = pos_tag(words)
@@ -199,10 +206,11 @@ class RandomWalkAttack(TextEditor):
 
         return corrected_text
 
+
 class GPTParaphraser(TextEditor):
     """Paraphrase a text using the GPT model."""
 
-    def __init__(self, openai_model: str, prompt: str) -> None:
+    def __init__(self, openai_model: str) -> None:
         """
             Initialize the GPT paraphraser.
 
@@ -210,14 +218,110 @@ class GPTParaphraser(TextEditor):
                 openai_model (str): The OpenAI model to use for paraphrasing.
                 prompt (str): The prompt to use for paraphrasing.
         """
+        super().__init__()
         self.openai_model = openai_model
-        self.prompt = prompt
+        self.prompt = "[[START OF TEXT]]\n{}\n[[END OF TEXT]]"
+        self.system_prompt = (
+            "You are an expert copy-editor. Please rewrite the following text in your own voice and paraphrase all "
+            "sentences.\n Ensure that the final output contains the same information as the original text and has "
+            "roughly the same length.\n Do not leave out any important details when rewriting in your own voice. Do "
+            "not include any information that is not present in the original text. Do not respond with a greeting or "
+            "any other extraneous information. Skip the preamble. Just rewrite the text directly."
+        )
 
     def edit(self, text: str, reference=None):
         """Paraphrase the text using the GPT model."""
-        openai_util = OpenAIAPI(model=self.openai_model, temperature=0.2, system_content="Your are a helpful assistant to rewrite the text.")
-        paraphrased_text = openai_util.get_result(self.prompt + text)
+        openai_util = OpenAIAPI(model=self.openai_model, temperature=0.2,
+                                system_content=self.system_prompt)
+        paraphrased_text = openai_util.get_result(self.prompt.format(text))
         return paraphrased_text
+
+
+class LLMParaphraser(TextEditor):
+    """Paraphrase a text using the LLM model."""
+
+    def __init__(self, model, tokenizer, device='cuda', max_length=1024, **kwargs):
+        """
+            Initialize the LLM paraphraser.
+
+            Parameters:
+                model: The LLM model.
+                tokenizer: The tokenizer for the LLM model.
+                device (str): The device to use for inference.
+                max_length (int): The maximum length of the output.
+        """
+        super().__init__()
+        self.model = model.eval()
+        self.tokenizer = tokenizer
+        self.device = device
+        self.max_length = max_length
+        self.gen_kwargs = {}
+        self.system_prompt = (
+            "You are an expert copy-editor. Please rewrite the following text in your own voice and paraphrase all sentences.\n"
+            "Ensure that the final output contains the same information as the original text and has roughly the same length.\n"
+            "Do not leave out any important details when rewriting in your own voice. Do not include any information that is not"
+            "present in the original text. Do not respond with a greeting or any other extraneous information. "
+            "Skip the preamble. Just rewrite the text directly."
+        )
+        self.instruction = "\n[[START OF TEXT]]\n{}\n[[END OF TEXT]]"
+        self.response = "[[START OF PARAPHRASE]]\n"
+        self.gen_kwargs.update(kwargs)
+
+    def edit(self, text: str, reference=None):
+        """Paraphrase the text using the LLM model."""
+        # Prepare the input for the model
+        prompt = self.tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": self.instruction.format(text)},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        ) + self.response
+        # Tokenize the input
+        final_input = self.tokenizer([prompt], return_tensors="pt")
+        final_input = {k: v.to(self.device) for k, v in final_input.items()}
+
+        # Generate the edited text
+        with torch.inference_mode():
+            outputs = self.model.generate(**final_input, **self.gen_kwargs)
+        outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        # Extract the paraphrased text
+        output = outputs[0].split("[[START OF PARAPHRASE]]")[1].split("[[END OF")[0].strip()
+
+        return output
+
+    def edit_batch(self, texts: list, references=None):
+        prompts = [
+            self.tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": self.instruction.format(text)},
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            ) + self.response
+            for text in texts
+        ]
+        final_inputs = self.tokenizer(prompts, return_tensors="pt", padding=True)
+        final_input = {k: v.to(self.device) for k, v in final_inputs.items()}
+        with torch.inference_mode():
+            outputs = self.model.generate(**final_input, **self.gen_kwargs)
+        outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        paraphrased_texts = [
+            output.split("[[START OF PARAPHRASE]]")[1].split("[[END OF")[0].strip()
+            for output in outputs
+        ]
+        if "num_return_sequences" in self.gen_kwargs and self.gen_kwargs["num_return_sequences"] > 1:
+            # split into list of lists
+            batch_size = self.gen_kwargs["num_return_sequences"]
+            return [
+                paraphrased_texts[st:st + batch_size]
+                for st in range(0, len(paraphrased_texts), batch_size)
+            ]
+        return paraphrased_texts
 
 
 class DipperParaphraser(TextEditor):
@@ -236,6 +340,7 @@ class DipperParaphraser(TextEditor):
                 order_diversity (int): The order diversity of the output, choose multiples of 20 from 0 to 100. 0 means no diversity, 100 means maximum diversity.
                 sent_interval (int): The number of sentences to process at a time.
         """
+        super().__init__()
         self.tokenizer = tokenizer
         self.model = model.eval()
         self.device = device
@@ -248,7 +353,7 @@ class DipperParaphraser(TextEditor):
         # Validate diversity settings
         self._validate_diversity(self.lex_diversity, "Lexical")
         self._validate_diversity(self.order_diversity, "Order")
-    
+
     def _validate_diversity(self, value: int, type_name: str):
         """Validate the diversity value."""
         if value not in [0, 20, 40, 60, 80, 100]:
@@ -260,35 +365,35 @@ class DipperParaphraser(TextEditor):
         # Calculate the lexical and order diversity codes
         lex_code = int(100 - self.lex_diversity)
         order_code = int(100 - self.order_diversity)
-        
+
         # Preprocess the input text
         text = " ".join(text.split())
         sentences = sent_tokenize(text)
-        
+
         # Preprocess the reference text
         prefix = " ".join(reference.replace("\n", " ").split())
-        
+
         output_text = ""
-        
+
         # Process the input text in sentence windows
         for sent_idx in range(0, len(sentences), self.sent_interval):
             curr_sent_window = " ".join(sentences[sent_idx:sent_idx + self.sent_interval])
-            
+
             # Prepare the input for the model
             final_input_text = f"lexical = {lex_code}, order = {order_code}"
             if prefix:
                 final_input_text += f" {prefix}"
             final_input_text += f" <sent> {curr_sent_window} </sent>"
-            
+
             # Tokenize the input
             final_input = self.tokenizer([final_input_text], return_tensors="pt")
             final_input = {k: v.cuda() for k, v in final_input.items()}
-            
+
             # Generate the edited text
             with torch.inference_mode():
                 outputs = self.model.generate(**final_input, **self.gen_kwargs)
             outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            
+
             # Update the prefix and output text
             prefix += " " + outputs[0]
             output_text += " " + outputs[0]
@@ -306,13 +411,14 @@ class WordDeletion(TextEditor):
             Parameters:
                 ratio (float): The ratio of words to delete.
         """
+        super().__init__()
         self.ratio = ratio
 
     def edit(self, text: str, reference=None):
         """Delete words randomly from the text."""
 
         # Handle empty string input
-        if not text:  
+        if not text:
             return text
 
         # Split the text into words and randomly delete each word based on the ratio
@@ -335,6 +441,7 @@ class SynonymSubstitution(TextEditor):
             Parameters:
                 ratio (float): The ratio of words to replace.
         """
+        super().__init__()
         self.ratio = ratio
         # Ensure wordnet data is available
         nltk.download('wordnet')
@@ -343,7 +450,7 @@ class SynonymSubstitution(TextEditor):
         """Randomly replace words with synonyms from WordNet."""
         words = text.split()
         num_words = len(words)
-        
+
         # Dictionary to cache synonyms for words
         word_synonyms = {}
 
@@ -362,7 +469,7 @@ class SynonymSubstitution(TextEditor):
         # Randomly select words to replace
         if num_to_replace > 0:
             indices_to_replace = random.sample(replaceable_indices, num_to_replace)
-        
+
             # Perform replacement
             for i in indices_to_replace:
                 synonyms = word_synonyms[words[i]]
@@ -389,12 +496,13 @@ class ContextAwareSynonymSubstitution(TextEditor):
             model (BertForMaskedLM): BERT model for masked language modeling.
             device (str): Device to run the model (e.g., 'cuda', 'cpu').
         """
+        super().__init__()
         self.ratio = ratio
         self.tokenizer = tokenizer
         self.model = model
         self.device = device
         nltk.download('wordnet')
-    
+
     def _get_synonyms_from_wordnet(self, word: str):
         """ Return a list of synonyms for the given word using WordNet. """
         synonyms = set()
@@ -420,9 +528,9 @@ class ContextAwareSynonymSubstitution(TextEditor):
 
         for i in indices_to_replace:
             # Create a sentence with a [MASK] token
-            masked_sentence = words[:i] + ['[MASK]'] + words[i+1:]
+            masked_sentence = words[:i] + ['[MASK]'] + words[i + 1:]
             masked_text = " ".join(masked_sentence)
-            
+
             # Use BERT to predict the token for [MASK]
             inputs = self.tokenizer(masked_text, return_tensors='pt', padding=True, truncation=True).to(self.device)
             mask_position = torch.where(inputs["input_ids"][0] == self.tokenizer.mask_token_id)[0].item()
@@ -435,7 +543,7 @@ class ContextAwareSynonymSubstitution(TextEditor):
             predicted_tokens = self.tokenizer.convert_ids_to_tokens(predicted_indices[0:1])
             words[i] = predicted_tokens[0]
             real_replace += 1
-        
+
         replaced_text = ' '.join(words)
 
         return replaced_text
@@ -469,7 +577,7 @@ class TruncateTaskTextEditor(TextEditor):
             return truncated_text
         else:
             return text
-        
+
 
 class CodeGenerationTextEditor(TextEditor):
     """Process the code generation output, removing the extra parts."""
@@ -488,8 +596,8 @@ class BackTranslationTextEditor(TextEditor):
     """Translate text from source language to intermediary language, then back to the source language."""
 
     def __init__(self,
-                 translate_to_intermediary = Translator(from_lang="en", to_lang="zh").translate,
-                 translate_to_source = Translator(from_lang="zh", to_lang="en").translate) -> None:
+                 translate_to_intermediary=Translator(from_lang="en", to_lang="zh").translate,
+                 translate_to_source=Translator(from_lang="zh", to_lang="en").translate) -> None:
         """
         Initialize the back translation editor.
 
