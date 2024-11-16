@@ -18,10 +18,13 @@
 # =======================================================
 
 import math
-import torch
+import re
+
 import sacrebleu
+import torch
+
+from exceptions.exceptions import InvalidAnswerError
 from utils.openai_utils import OpenAIAPI
-from exceptions.exceptions import CodeExecutionError, InvalidAnswerError
 
 
 class TextQualityAnalyzer:
@@ -33,6 +36,9 @@ class TextQualityAnalyzer:
     def analyze(self, text: str):
         pass
 
+    def analyze_batched(self, texts: list):
+        return [self.analyze(text) for text in texts]
+
 
 class DirectTextQualityAnalyzer(TextQualityAnalyzer):
     """Base class for direct text quality analyzer."""
@@ -42,6 +48,9 @@ class DirectTextQualityAnalyzer(TextQualityAnalyzer):
 
     def analyze(self, text: str):
         pass
+
+    def analyze_batched(self, texts: list):
+        return [self.analyze(text) for text in texts]
 
 
 class ReferencedTextQualityAnalyzer(TextQualityAnalyzer):
@@ -53,6 +62,9 @@ class ReferencedTextQualityAnalyzer(TextQualityAnalyzer):
     def analyze(self, text: str, reference):
         pass
 
+    def analyze_batched(self, texts: list, references: list):
+        return [self.analyze(text, reference) for text, reference in zip(texts, references)]
+
 
 class ExternalDiscriminatorTextQualityAnalyzer(TextQualityAnalyzer):
     """Base class for external discriminator text quality analyzer."""
@@ -63,6 +75,8 @@ class ExternalDiscriminatorTextQualityAnalyzer(TextQualityAnalyzer):
     def analyze(self, text1: str, text2: str, description: str):
         pass
 
+    def analyze_batched(self, texts1: list, texts2: list, descriptions: list):
+        return [self.analyze(text1, text2, description) for text1, text2, description in zip(texts1, texts2, descriptions)]
 
 class PPLCalculator(DirectTextQualityAnalyzer):
     """Perplexity calculator for text quality analysis."""
@@ -83,7 +97,8 @@ class PPLCalculator(DirectTextQualityAnalyzer):
     def analyze(self, text: str):
         """Calculate the perplexity of the given text."""
         criterion = torch.nn.CrossEntropyLoss()
-        encoded_text = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(self.device)
+        encoded_text = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(
+            self.device)
         logits = self.model(torch.unsqueeze(encoded_text, 0), return_dict=True).logits[0]
         loss = criterion(logits[:-1], encoded_text[1:])
         ppl = torch.exp(loss)
@@ -92,7 +107,7 @@ class PPLCalculator(DirectTextQualityAnalyzer):
 
 class LogDiversityAnalyzer(DirectTextQualityAnalyzer):
     """Log diversity analyzer for text quality analysis."""
-    
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -139,7 +154,8 @@ class LogDiversityAnalyzer(DirectTextQualityAnalyzer):
         ]
 
         # Overall diversity is the product of individual n-gram diversities
-        overall_diversity = (1 - diversity_scores[0] / 100) * (1 - diversity_scores[1] / 100) * (1 - diversity_scores[2] / 100)
+        overall_diversity = (1 - diversity_scores[0] / 100) * (1 - diversity_scores[1] / 100) * (
+                    1 - diversity_scores[2] / 100)
         log_diversity = -math.log(max(1 - overall_diversity, math.exp(-20)))
 
         return log_diversity
@@ -159,15 +175,16 @@ class BLEUCalculator(ReferencedTextQualityAnalyzer):
 
 class PassOrNotJudger(ReferencedTextQualityAnalyzer):
     """Pass or not judger for text quality analysis."""
+
     def __init__(self) -> None:
         pass
 
     def _check_correctness(self, prompt: str, completion: str, test: str, entry_point: str):
-        """Check the correctness of the code.""" 
+        """Check the correctness of the code."""
         check_program = (
-            prompt + '\n' + completion + "\n" +
-            test + "\n" +
-            f"check({entry_point})"
+                prompt + '\n' + completion + "\n" +
+                test + "\n" +
+                f"check({entry_point})"
         )
         # print(check_program)
         try:
@@ -181,7 +198,7 @@ class PassOrNotJudger(ReferencedTextQualityAnalyzer):
         """Check if the text passes the correctness test."""
         passed = self._check_correctness(reference['task'], text, reference['test'], reference['entry_point'])
         return passed
-    
+
 
 class GPTTextDiscriminator(ExternalDiscriminatorTextQualityAnalyzer):
     """GPT text discriminator for text quality analysis."""
@@ -196,7 +213,7 @@ class GPTTextDiscriminator(ExternalDiscriminatorTextQualityAnalyzer):
         """
         self.openai_model = openai_model
         self.task_description = task_description
-    
+
     def _get_query(self, text1: str, text2: str, question: str):
         """Get the query for text discrimination."""
 
@@ -210,7 +227,7 @@ class GPTTextDiscriminator(ExternalDiscriminatorTextQualityAnalyzer):
 
     def analyze(self, text1: str, text2: str, question: str):
         """Analyze the text to determine which one is better."""
-        openai_util = OpenAIAPI(model=self.openai_model, temperature=0.2, 
+        openai_util = OpenAIAPI(model=self.openai_model, temperature=0.2,
                                 system_content="You are a helpful assistant to determine which of the two answers is better based on the given task description.")
         query = self._get_query(text1, text2, question)
         answer = openai_util.get_result(query)
@@ -218,3 +235,112 @@ class GPTTextDiscriminator(ExternalDiscriminatorTextQualityAnalyzer):
         if answer not in ['0', '1', '2']:
             raise InvalidAnswerError
         return eval(answer)
+
+
+class LLMTextRater(ReferencedTextQualityAnalyzer):
+    """LLM text discriminator for text quality analysis."""
+
+    def __init__(self, model, tokenizer, device='cuda', cot=True, **kwargs) -> None:
+        """
+            Initialize the LLM text rater.
+
+            Parameters:
+                model: The language model to use for text rating.
+                tokenizer: The tokenizer for the language model.
+                device (str): The device to use for the rating.
+        """
+        super().__init__()
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.model.to(self.device)
+        self.system_prompt = """Please act as an impartial judge and evaluate the quality of the response provided by 
+        an AI assistant to the user question displayed below. Your evaluation hinges on the following factors: 
+        accuracy, level of details, typographical correctness, grammatical correctness and lexical correctness. Be as 
+        objective as possible, and account for every one of these criteria in our evaluation. Begin your evaluation 
+        by providing a very short explanation. After providing your explanation, please rate the response on a scale of 
+        1 to 100 by strictly following this format: "[[rating]]", for example: "Rating: [[51]]". Your rating must come 
+        AFTER your explanation, not before.""" if cot else """ You are given a prompt and a response, and you provide a 
+        grade out of 100 measuring the quality of the response, in terms of accuracy, level of details, and 
+        typographical, grammatical and lexical correctness. Remove points as soon as one of the criteria is missed. 
+        please rate the response on a scale of 1 to 100 by strictly following this format: "[[rating]]", 
+        for example: "Rating: [[51]]".
+        """
+        self.instruction = f"Prompt:\n{{}}\nResponse:\n{{}}"
+        self.response = "<analysis>" if cot else "Rating: "
+        self.num_regex = re.compile(r"([0-9]+\.*[0-9]*)(/100)?")
+        self.gen_kwargs = kwargs
+
+    def analyze(self, text: str, reference):
+        prompt = self.tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": self.instruction.format(reference, text)},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        ) + self.response
+        # Tokenize the input
+        final_input = self.tokenizer([prompt], return_tensors="pt")
+        final_input = {k: v.to(self.device) for k, v in final_input.items()}
+        # Generate the output
+        with torch.inference_mode():
+            output = self.model.generate(**final_input, **self.gen_kwargs)
+        # Decode the output
+        decoded_output = self.tokenizer.decode(output[0], skip_special_tokens=True)
+        # remove anything before <analysis>
+        decoded_output = " ".join(decoded_output.split(self.response)[1:])
+        # Extract the rating from the output
+        rating = 0.0
+        matches = re.findall(self.num_regex, decoded_output)
+        if matches and len(matches):
+            val = matches[-1][0].replace("[", "").replace("]", "")
+            if "/" in val:
+                rating = float(val.split("/")[0]) / float(
+                    val.split("/")[1]
+                )
+            else:
+                rating = float(val) / 100
+
+        rating = max(min(rating, 1), 0)
+        return rating
+
+    def analyze_batched(self, texts: list, references: list):
+        prompts =[
+            self.tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": self.instruction.format(reference, text)},
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            ) + self.response
+            for text, reference in zip(texts, references)
+        ]
+        # Tokenize the input
+        final_input = self.tokenizer(prompts, return_tensors="pt", padding=True)
+        final_input = {k: v.to(self.device) for k, v in final_input.items()}
+        # Generate the output
+        with torch.inference_mode():
+            output = self.model.generate(**final_input, **self.gen_kwargs)
+        # Decode the output
+        decoded_output = self.tokenizer.batch_decode(output, skip_special_tokens=True)
+        ratings = []
+        for text in decoded_output:
+            # remove anything before <analysis>
+            text = " ".join(text.split(self.response)[1:])
+            # Extract the rating from the output
+            rating = 0.0
+            matches = re.findall(self.num_regex, text)
+            if matches and len(matches):
+                val = matches[-1][0].replace("[", "").replace("]", "")
+                if "/" in val:
+                    rating = float(val.split("/")[0]) / float(
+                        val.split("/")[1]
+                    )
+                else:
+                    rating = float(val) / 100
+
+            rating = max(min(rating, 1), 0)
+            ratings.append(rating)
+        return ratings
