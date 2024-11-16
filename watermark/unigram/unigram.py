@@ -17,7 +17,7 @@
 # Description: Implementation of Unigram algorithm
 # ================================================
 
-from typing import Union
+from typing import Union, List
 import torch
 import hashlib
 import numpy as np
@@ -29,6 +29,7 @@ from utils.transformers_config import TransformersConfig
 from exceptions.exceptions import AlgorithmNameMismatchError
 from transformers import LogitsProcessor, LogitsProcessorList
 from visualize.data_for_visualization import DataForVisualization
+from scipy.stats import norm
 
 
 class UnigramConfig:
@@ -48,7 +49,7 @@ class UnigramConfig:
             config_dict = load_config_file(algorithm_config)
         if config_dict['algorithm_name'] != 'Unigram':
             raise AlgorithmNameMismatchError('Unigram', config_dict['algorithm_name'])
-        
+
         self.gamma = config_dict['gamma']
         self.delta = config_dict['delta']
         self.hash_key = config_dict['hash_key']
@@ -72,22 +73,22 @@ class UnigramUtils:
                 config (UnigramConfig): Configuration for the Unigram algorithm.
         """
         self.config = config
-        self.mask = np.array([True] * int(self.config.gamma * self.config.vocab_size) + 
+        self.mask = np.array([True] * int(self.config.gamma * self.config.vocab_size) +
                              [False] * (self.config.vocab_size - int(self.config.gamma * self.config.vocab_size)))
         self.rng = np.random.default_rng(self._hash_fn(self.config.hash_key))
         self.rng.shuffle(self.mask)
-        
+
     @staticmethod
     def _hash_fn(x: int) -> int:
         """hash function to generate random seed, solution from https://stackoverflow.com/questions/67219691/python-hash-function-that-returns-32-or-64-bits"""
         x = np.int64(x)
         return int.from_bytes(hashlib.sha256(x).digest()[:4], 'little')
-    
+
     def _compute_z_score(self, observed_count: int, T: int) -> float:
         """Compute z-score for the given observed count and total tokens."""
         expected_count = self.config.gamma
-        numer = observed_count - expected_count * T 
-        denom = sqrt(T * expected_count * (1 - expected_count))  
+        numer = observed_count - expected_count * T
+        denom = sqrt(T * expected_count * (1 - expected_count))
         z = numer / denom
         return z
 
@@ -121,20 +122,18 @@ class UnigramLogitsProcessor(LogitsProcessor):
         """
         self.config = config
         self.utils = utils
-        self.green_list_mask = torch.tensor(self.utils.mask, dtype=torch.float32)
+        self.green_list_mask = torch.tensor(self.utils.mask, dtype=torch.float32, device=self.config.device)
+        self.watermark: torch.FloatTensor = self.green_list_mask * self.config.delta
 
-    def _bias_greenlist_logits(self, scores: torch.Tensor, greenlist_mask: torch.Tensor, greenlist_bias: float) -> torch.Tensor:
+    def _bias_greenlist_logits(self, scores: torch.Tensor, greenlist_mask: torch.Tensor,
+                               greenlist_bias: float) -> torch.Tensor:
         """Bias the logits for the greenlist tokens."""
         scores[greenlist_mask] = scores[greenlist_mask] + greenlist_bias
         return scores
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        """Process the logits and add watermark."""
-        greenlist_mask = torch.zeros_like(scores)
-        for i in range(input_ids.shape[0]):
-            greenlist_mask[i] = self.green_list_mask
-        scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=greenlist_mask.bool(), greenlist_bias=self.config.delta)
-        return scores
+        """Add the watermark to the logits and return new logits."""
+        return scores + self.watermark
 
 
 class Unigram(BaseWatermark):
@@ -158,24 +157,90 @@ class Unigram(BaseWatermark):
         # Configure generate_with_watermark
         generate_with_watermark = partial(
             self.config.generation_model.generate,
-            logits_processor=LogitsProcessorList([self.logits_processor]), 
+            logits_processor=LogitsProcessorList([self.logits_processor]),
             **self.config.gen_kwargs
         )
-        
+
         # encode prompt
-        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(self.config.device)
+        encoded_prompt = self.config.generation_tokenizer(prompt, return_tensors="pt", add_special_tokens=True,
+                                                          padding=True).to(self.config.device)
         # generate watermarked text
         encoded_watermarked_text = generate_with_watermark(**encoded_prompt)
         # decode
-        watermarked_text = self.config.generation_tokenizer.batch_decode(encoded_watermarked_text, skip_special_tokens=True)[0]
+        watermarked_text = \
+            self.config.generation_tokenizer.batch_decode(encoded_watermarked_text, skip_special_tokens=True)[0]
         return watermarked_text
-        
+
+    def generate_watermarked_texts(self, prompts: list, *args, **kwargs) -> list:
+        # Configure generate_with_watermark
+        generate_with_watermark = partial(
+            self.config.generation_model.generate,
+            logits_processor=LogitsProcessorList([self.logits_processor]),
+            **self.config.gen_kwargs
+        )
+        # encode prompts
+        encoded_prompts = self.config.generation_tokenizer(prompts, return_tensors="pt", padding=True,
+                                                           add_special_tokens=True).to(self.config.device)
+        # generate watermarked texts
+        encoded_watermarked_texts = generate_with_watermark(**encoded_prompts)
+        # decode
+        watermarked_texts = self.config.generation_tokenizer.batch_decode(encoded_watermarked_texts,
+                                                                          skip_special_tokens=True)
+        return watermarked_texts
+
+    @staticmethod
+    def _z_score(num_green: int, total: int, fraction: float) -> float:
+        """Calculate and return the z-score of the number of green tokens in a sequence."""
+        return (num_green - fraction * total) / np.sqrt(fraction * (1 - fraction) * total)
+
+    @staticmethod
+    def _compute_tau(m: int, N: int, alpha: float) -> float:
+        """
+        Compute the threshold tau for the dynamic thresholding.
+
+        Args:
+            m: The number of unique tokens in the sequence.
+            N: Vocabulary size.
+            alpha: The false positive rate to control.
+        Returns:
+            The threshold tau.
+        """
+        factor = np.sqrt(1 - (m - 1) / (N - 1))
+        tau = factor * norm.ppf(1 - alpha)
+        return tau
+
+
+    def dynamic_threshold(self, sequence: List[int], vocab_size: int, alpha: float = 0.01) -> (bool, float):
+        """Dynamic thresholding for watermark detection. True if the sequence is watermarked, False otherwise."""
+        sequence = list(set(sequence))
+        green_tokens = int(sum(self.utils.mask[i] for i in sequence))
+        z_score = self._z_score(green_tokens, len(sequence), self.config.gamma)
+        tau = self._compute_tau(len(list(set(sequence))), vocab_size, alpha)
+        return z_score > tau, z_score
+
     def detect_watermark(self, text: str, return_dict: bool = True, *args, **kwargs) -> Union[tuple, dict]:
         """Detect watermark in the given text."""
 
         # encode text
-        encoded_text = self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(self.config.device)
-        
+        tokens = self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+        # convert to list
+        tokens = tokens.tolist()
+        # compute z_score
+        is_watermarked, z_score = self.dynamic_threshold(tokens, self.config.vocab_size)
+        # Return results based on the return_dict flag
+        if return_dict:
+            return {"is_watermarked": is_watermarked, "score": z_score}
+        else:
+            return (is_watermarked, z_score)
+
+    def detect_watermark_old(self, text: str, return_dict: bool = True, *args, **kwargs) -> Union[tuple, dict]:
+        """Detect watermark in the given text."""
+
+        # encode text
+        encoded_text = \
+            self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(
+                self.config.device)
+
         # compute z_score
         z_score, _ = self.utils.score_sequence(encoded_text)
 
@@ -187,20 +252,22 @@ class Unigram(BaseWatermark):
             return {"is_watermarked": is_watermarked, "score": z_score}
         else:
             return (is_watermarked, z_score)
-    
+
     def get_data_for_visualization(self, text: str, *args, **kwargs) -> tuple[list[str], list[int]]:
         """Get data for visualization."""
-        
+
         # encode text
-        encoded_text = self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(self.config.device)
-        
+        encoded_text = \
+            self.config.generation_tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0].to(
+                self.config.device)
+
         # compute z-score and highlight values
         z_score, highlight_values = self.utils.score_sequence(encoded_text)
-        
+
         # decode single tokens
         decoded_tokens = []
         for token_id in encoded_text:
             token = self.config.generation_tokenizer.decode(token_id.item())
             decoded_tokens.append(token)
-        
+
         return DataForVisualization(decoded_tokens, highlight_values)
