@@ -241,6 +241,26 @@ class XSIR(BaseWatermark):
 
         return watermarked_text
 
+    def generate_watermarked_texts(self, prompts: list, *args, **kwargs) -> list:
+        """Generate watermarked texts for the given prompts."""
+
+        # Configure generate_with_watermark
+        generate_with_watermark = partial(
+            self.config.generation_model.generate,
+            logits_processor=LogitsProcessorList([self.logits_processor]),
+            **self.config.gen_kwargs
+        )
+
+        # encode prompts
+        encoded_prompts = self.config.generation_tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=True).to(self.config.device)
+
+        # generate watermarked texts
+        encoded_watermarked_texts = generate_with_watermark(**encoded_prompts)
+
+        # decode
+        watermarked_texts = self.config.generation_tokenizer.batch_decode(encoded_watermarked_texts, skip_special_tokens=True)
+
+        return watermarked_texts
     def detect_watermark(self, text: str, return_dict: bool = True, *args, **kwargs) -> Union[dict[str, Union[bool, float]], tuple[bool, float]]:
         """Detect watermark in the input text."""
         z_score = None
