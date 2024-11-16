@@ -38,6 +38,7 @@ class DetectionResult:
 
 class BaseSuccessRateCalculator:
     """Base class for success rate calculator."""
+
     def __init__(self, labels: List[str] = ['TPR', 'TNR', 'FPR', 'FNR', 'P', 'R', 'F1', 'ACC']) -> None:
         """
             Initialize the success rate calculator.
@@ -46,18 +47,19 @@ class BaseSuccessRateCalculator:
                 labels (List[str]): The list of metric labels to include in the output.
         """
         self.labels = labels
-    
+
     def _check_instance(self, data: List[Union[bool, float]], expected_type: type):
         """Check if the data is an instance of the expected type."""
         for d in data:
             if not isinstance(d, expected_type):
                 raise TypeMismatchException(expected_type, type(d))
-    
+
     def _filter_metrics(self, metrics: Dict[str, float]) -> Dict[str, float]:
         """Filter metrics based on the provided labels."""
         return {label: metrics[label] for label in self.labels if label in metrics}
-    
-    def calculate(self, watermarked_result: List[Union[bool, float]], non_watermarked_result: List[Union[bool, float]]) -> Dict[str, float]:
+
+    def calculate(self, watermarked_result: List[Union[bool, float]],
+                  non_watermarked_result: List[Union[bool, float]]) -> Dict[str, float]:
         """Calculate success rates based on provided results."""
         pass
 
@@ -82,7 +84,7 @@ class FundamentalSuccessRateCalculator(BaseSuccessRateCalculator):
                 labels (List[str]): The list of metric labels to include in the output.
         """
         super().__init__(labels)
-    
+
     def _compute_metrics(self, inputs: List[DetectionResult]) -> Dict[str, float]:
         """Compute metrics based on the provided inputs."""
         TP = sum(1 for d in inputs if d.detect_result and d.gold_label)
@@ -109,7 +111,8 @@ class FundamentalSuccessRateCalculator(BaseSuccessRateCalculator):
         self._check_instance(watermarked_result, bool)
         self._check_instance(non_watermarked_result, bool)
 
-        inputs = [DetectionResult(True, x) for x in watermarked_result] + [DetectionResult(False, x) for x in non_watermarked_result]
+        inputs = [DetectionResult(True, x) for x in watermarked_result] + [DetectionResult(False, x) for x in
+                                                                           non_watermarked_result]
         metrics = self._compute_metrics(inputs)
         return self._filter_metrics(metrics)
 
@@ -126,9 +129,9 @@ class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
         is not fixed and can vary.
     """
 
-    def __init__(self, 
-                 labels: List[str] = ['TPR', 'TNR', 'FPR', 'FNR', 'P', 'R', 'F1', 'ACC'], 
-                 rule='best', 
+    def __init__(self,
+                 labels: List[str] = ['TPR', 'TNR', 'FPR', 'FNR', 'P', 'R', 'F1', 'ACC'],
+                 rule='best',
                  target_fpr=None,
                  reverse=False) -> None:
         """
@@ -146,7 +149,7 @@ class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
         self.rule = rule
         self.target_fpr = target_fpr
         self.reverse = reverse
-        
+
         # Validate rule configuration
         if self.rule not in ['best', 'target_fpr']:
             raise ConfigurationError(f"Invalid rule specified: {self.rule}. Choose from 'best' or 'target_fpr'.")
@@ -183,7 +186,7 @@ class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
     def _find_threshold(self, inputs: List[DetectionResult]) -> float:
         """Find the threshold based on the specified rule."""
         sorted_inputs = sorted(inputs, key=lambda x: x.detect_result, reverse=self.reverse)
-        
+
         # If the rule is to find the best threshold by maximizing accuracy
         if self.rule == 'best':
             return self._find_best_threshold(sorted_inputs)
@@ -216,11 +219,26 @@ class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
         }
         return metrics
 
+    def find_threshold(self, watermarked_result: List[float], non_watermarked_result: List[float]) -> float:
+        """Find the threshold based on the provided results."""
+        self._check_instance(watermarked_result + non_watermarked_result, float)
+        inputs = [DetectionResult(True, x) for x in watermarked_result] + [DetectionResult(False, x) for x in
+                                                                           non_watermarked_result]
+        return self._find_threshold(inputs)
+
+    def calculate_from_threshold(self, result: List[float], threshold: float) -> Dict[str, float]:
+        """Calculate success rates based on provided results and threshold."""
+        self._check_instance(result, float)
+        inputs = [DetectionResult(True, x) for x in result]
+        metrics = self._compute_metrics(inputs, threshold)
+        return self._filter_metrics(metrics)
+
     def calculate(self, watermarked_result: List[float], non_watermarked_result: List[float]) -> Dict[str, float]:
         """Calculate success rates based on provided results."""
         self._check_instance(watermarked_result + non_watermarked_result, float)
 
-        inputs = [DetectionResult(True, x) for x in watermarked_result] + [DetectionResult(False, x) for x in non_watermarked_result]
+        inputs = [DetectionResult(True, x) for x in watermarked_result] + [DetectionResult(False, x) for x in
+                                                                           non_watermarked_result]
         threshold = self._find_threshold(inputs)
         metrics = self._compute_metrics(inputs, threshold)
         return self._filter_metrics(metrics)
