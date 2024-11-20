@@ -12,7 +12,7 @@ from evaluation.dataset import MarkMyWordsDataset
 from evaluation.pipelines.robustness import WatermarkRobustnessPipeline
 from evaluation.tools.text_editor import TruncatePromptTextEditor, WordDeletion, SynonymSubstitution, LLMParaphraser, \
     GPTParaphraser, ContextAwareSynonymSubstitution
-from evaluation.tools.text_quality_analyzer import LLMTextRater, PPLCalculator
+from evaluation.tools.text_quality_analyzer import LLMTextRater, PPLCalculator, GPTTextRater
 from utils.transformers_config import TransformersConfig
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -101,8 +101,7 @@ class RobustnessPipelineFactory:
     """Factory for creating watermark robustness evaluation pipelines."""
 
     def __init__(self, devices: List[str]):
-        self.rating_metrics = RobustnessPipelineFactory._create_rating_metrics(devices[-1])
-        self.devices = devices[:-1]
+        self.devices = devices
 
     def create_pipeline(self,
                         dataset: MarkMyWordsDataset,
@@ -110,35 +109,45 @@ class RobustnessPipelineFactory:
                         filename: str = None
                         ) -> 'WatermarkRobustnessPipeline':
         """Create a pipeline with standard configuration."""
-        if mode == 'generate_only':
-            edit_sequences = {'none': [TruncatePromptTextEditor()]}
-        elif mode == 'end_to_end':
-            edit_sequences = RobustnessPipelineFactory._create_edit_sequences(self.devices)
-        elif mode == 'add_edits':
-            edit_sequences = RobustnessPipelineFactory._create_extra_edit_sequences(self.devices)
-        elif mode == 'base_paraphrase':
-            edit_sequences = RobustnessPipelineFactory._create_base_paraphrase_sequences(self.devices)
+        if mode == 'gpt_judge':
+            rating_metrics = {
+                "gpt_judge": GPTTextRater(openai_model='gpt-4o-mini', cot=True)
+            }
+            edit_sequences = {}
+            batch_size = 32
         else:
-            raise ValueError(f"Invalid mode {mode}.")
+            rating_metrics = RobustnessPipelineFactory._create_rating_metrics(self.devices[-1])
+            if mode == 'generate_only':
+                edit_sequences = {'none': [TruncatePromptTextEditor()]}
+            elif mode == 'end_to_end':
+                edit_sequences = RobustnessPipelineFactory._create_edit_sequences(self.devices[:-1])
+            elif mode == 'add_edits':
+                edit_sequences = RobustnessPipelineFactory._create_extra_edit_sequences(self.devices[:-1])
+            elif mode == 'base_paraphrase':
+                edit_sequences = RobustnessPipelineFactory._create_base_paraphrase_sequences(self.devices[:-1])
+            else:
+                raise ValueError(f"Invalid mode {mode}.")
+            batch_size = 16
 
         return WatermarkRobustnessPipeline(
             dataset=dataset,
             edit_sequences=edit_sequences,
-            rating_metrics=self.rating_metrics,
+            rating_metrics=rating_metrics,
             filename=filename,
-            batch_size=16
+            batch_size=batch_size
         )
 
     @staticmethod
     def _create_extra_edit_sequences(devices: List[str]) -> Dict:
         """Create extra set of text editing sequences."""
-        # bert = ModelLoader.from_name('bert-large-uncased', device=devices[0])
+        bert = ModelLoader.from_name('bert-large-uncased', device=devices[0])
         paraphraser_models = [
-            ("models/Unigram_new/Qwen/Qwen2.5-3B-Instruct", devices[0]),
-            ("models/Unigram_new/meta-llama/Llama-3.2-3B-Instruct", devices[0]),
+            # ("models/Unigram_new/Qwen/Qwen2.5-3B-Instruct", devices[0]),
+            # ("models/Unigram_new/meta-llama/Llama-3.2-3B-Instruct", devices[0]),
+            ("meta-llama/Llama-3.2-3B-Instruct", devices[0]),
         ]
         sequences = {
-            # 'Word-S(Context)': [ContextAwareSynonymSubstitution(ratio=0.5, **bert)],
+            'Word-S(Context)': [ContextAwareSynonymSubstitution(ratio=0.5, **bert)],
         }
         for model, device in paraphraser_models:
             paraphraser = RobustnessPipelineFactory._create_paraphraser(model, device)
@@ -162,11 +171,11 @@ class RobustnessPipelineFactory:
         paraphraser_models = [
             ("models/Unigram_new/Qwen/Qwen2.5-3B-Instruct", devices[3]),
             ("models/Unigram_new/meta-llama/Llama-3.2-3B-Instruct", devices[3]),
-            ("models/Unigram/Qwen/Qwen2.5-3B-Instruct", devices[2]),
-            ("models/Unigram/meta-llama/Llama-3.2-3B-Instruct", devices[2]),
+            # ("models/Unigram/Qwen/Qwen2.5-3B-Instruct", devices[2]),
+            # ("models/Unigram/meta-llama/Llama-3.2-3B-Instruct", devices[2]),
             ("Qwen/Qwen2.5-3B-Instruct", devices[1]),
             ("models/dpo_qwen_3_exponential", devices[1]),
-            ('meta-llama/Llama-3.1-8B-Instruct', devices[4]),
+            # ('meta-llama/Llama-3.1-8B-Instruct', devices[4]),
             # ("models/dpo_llama_3_all", devices[2])
         ]
 
@@ -233,7 +242,7 @@ def main():
         '--mode',
         type=str,
         default='end_to_end',
-        choices=['end_to_end', 'generate_only', 'add_edits', 'base_paraphrase']
+        choices=['end_to_end', 'generate_only', 'add_edits', 'base_paraphrase', 'gpt_judge']
     )
     parser.add_argument(
         '--dataset',
@@ -241,6 +250,7 @@ def main():
         default='eval',
         choices=['eval', 'train']
     )
+    parser.add_argument('--suff', type=str, required=False, default="_finaleval")
     parser.add_argument('--samples', type=int, default=296)
     parser.add_argument(
         '--hash_keys',
@@ -290,7 +300,10 @@ def main():
                 do_sample=provider_config.do_sample
             )
         }
-        suff = "_gen" if args.mode == 'generate_only' else "_edit"
+        if args.suff:
+            suff = args.suff
+        else:
+            suff = "_gen" if args.mode == 'generate_only' else "_edit"
         # Create and run pipeline based on mode
         pipeline = pipeline_factory.create_pipeline(
             dataset=dataset,
@@ -299,10 +312,12 @@ def main():
         )
         if args.mode in ['generate_only', 'end_to_end']:
             stats = pipeline.evaluate(watermark_args)
+        elif args.mode == "gpt_judge":
+            stats = pipeline.add_quality(f'{directory}/{args.algorithm}_final{hash_key}.tsv')
         else:
             if args.mode == 'base_paraphrase':
                 pipeline.edit_expansion = len(pipeline.edit_sequences) * NUM_PARAPHRASES
-            stats = pipeline.add_edits(f'{directory}/{args.algorithm}_edit_contd{hash_key}.tsv', watermark_args)
+            stats = pipeline.add_edits(f'{directory}/{args.algorithm}_gen{hash_key}.tsv', watermark_args)
 
         # Save results
         os.makedirs('evaluation/results', exist_ok=True)

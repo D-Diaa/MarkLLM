@@ -17,7 +17,7 @@ from tqdm import tqdm
 from evaluation.dataset import BaseDataset
 from evaluation.tools.text_editor import TextEditor, TruncatePromptTextEditor
 from evaluation.tools.text_quality_analyzer import TextQualityAnalyzer, LLMTextRater, ReferencedTextQualityAnalyzer, \
-    DirectTextQualityAnalyzer
+    DirectTextQualityAnalyzer, GPTTextRater
 from watermark.base import BaseWatermark
 
 
@@ -333,7 +333,7 @@ class RatingStage(PipelineStage):
             ratings = {}
             for metric_name, analyzer in self.rating_metrics.items():
                 # Handle different analyzer types
-                if isinstance(analyzer, LLMTextRater):
+                if isinstance(analyzer, LLMTextRater) or isinstance(analyzer, GPTTextRater):
                     if hasattr(self.dataset, 'raw_prompts') and self.use_dataset_prompts:
                         prompts = [self.dataset.raw_prompts[r.id][0] for r in batch]
                         batch = [replace(r, prompt=p) for r, p in zip(batch, prompts)]
@@ -351,6 +351,7 @@ class RatingStage(PipelineStage):
                 ratings[metric_name] = scores
             for i, response in enumerate(batch):
                 sample_ratings = {metric_name: scores[i] for metric_name, scores in ratings.items()}
+                sample_ratings.update(response.ratings)
                 rated_response = replace(response, ratings=sample_ratings)
                 rated_responses.append(rated_response)
         return rated_responses

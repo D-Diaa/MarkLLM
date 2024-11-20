@@ -140,6 +140,72 @@ class WatermarkRobustnessPipeline:
             summary_statistics=stats
         )
 
+    def add_quality(self, filename: str):
+        """
+        Load the pipeline from a file.
+        """
+        loader = ResponseLoader(filename)
+        responses = loader.load_all()
+        rating_queue = Queue()
+        saving_queue = Queue()
+        result_queue = Queue()
+        total_saved = len(responses)
+        rating_stage = RatingStage(
+            input_queue=rating_queue,
+            output_queue=saving_queue,
+            batch_size=self.batch_size,
+            total_items=total_saved,
+            rating_metrics=self.rating_metrics,
+            dataset=self.dataset,
+            show_progress=self.show_progress,
+            use_dataset_prompts=False
+        )
+
+        saving_stage = SavingStage(
+            input_queue=saving_queue,
+            output_queue=result_queue,
+            batch_size=self.batch_size,
+            total_items=total_saved,
+            filename=self.filename,
+            show_progress=self.show_progress,
+        )
+
+        # Start all stages
+        stages = [rating_stage, saving_stage]
+        for stage in stages:
+            stage.start()
+
+        # Feed responses into the rating stage
+        for response in responses:
+            rating_queue.put(response)
+        rating_queue.put(None)  # Signal end of input
+        while True:
+            try:
+                item = result_queue.get()
+                if item is None:
+                    break
+                responses.append(item)
+            except Exception as e:
+                logging.error(f"Error processing result: {str(e)}")
+                break
+
+        # Wait for all stages to complete
+        for stage in stages:
+            stage.join()
+
+        watermarked_responses = [r for r in responses if r.is_watermarked]
+        unwatermarked_responses = [r for r in responses if not r.is_watermarked]
+
+        reverse = "EXP" in filename
+
+        stats = self.get_summary_stats(responses=watermarked_responses + unwatermarked_responses, reverse=reverse)
+
+        return RobustnessEvaluationResult(
+            watermarked_responses=watermarked_responses,
+            unwatermarked_responses=unwatermarked_responses,
+            summary_statistics=stats
+        )
+
     def evaluate(self, watermark_args: dict) -> RobustnessEvaluationResult:
         """
         Conduct full watermark robustness evaluation using the pipeline architecture.
@@ -238,9 +304,9 @@ class WatermarkRobustnessPipeline:
         # Wait for all stages to complete
         for stage in stages:
             stage.join()
-
+        reverse = "EXP" in watermark_args["algorithm_name"]
         # Calculate final statistics
-        stats = self.get_summary_stats(responses=watermarked_responses + unwatermarked_responses)
+        stats = self.get_summary_stats(responses=watermarked_responses + unwatermarked_responses, reverse=reverse)
 
         return RobustnessEvaluationResult(
             watermarked_responses=watermarked_responses,
@@ -249,7 +315,7 @@ class WatermarkRobustnessPipeline:
         )
 
     @staticmethod
-    def get_summary_stats(filename: str = None, responses: List[Response] = None) -> Dict[str, Any]:
+    def get_summary_stats(filename: str = None, responses: List[Response] = None, reverse=None) -> Dict[str, Any]:
         if responses is None:
             if filename is None:
                 raise ValueError("Either filename or responses must be provided")
@@ -257,9 +323,11 @@ class WatermarkRobustnessPipeline:
             responses = loader.load_all()
         watermarked_unedited = [r for r in responses if r.is_watermarked and "none" == r.edit_sequence[0]]
         unwatermarked_unedited = [r for r in responses if not r.is_watermarked and "none" == r.edit_sequence[0]]
+        if reverse is None and filename is not None:
+            reverse = "EXP" in filename
         watermarked_unedited_scores = [r.watermark_score for r in watermarked_unedited]
         unwatermarked_unedited_scores = [r.watermark_score for r in unwatermarked_unedited]
-        calculator = DynamicThresholdSuccessRateCalculator(labels=['TPR', 'F1'], rule='target_fpr', target_fpr=0.01)
+        calculator = DynamicThresholdSuccessRateCalculator(labels=['TPR', 'F1'], rule='target_fpr', target_fpr=0.01, reverse=reverse)
         threshold = calculator.find_threshold(watermarked_unedited_scores, unwatermarked_unedited_scores)
         grouped_by_sequence = {}
         for response in responses:
