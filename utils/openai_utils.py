@@ -42,7 +42,7 @@ class OpenAIAPI:
         self.client = openai.OpenAI()
 
         # List of supported models
-        supported_models = ['gpt-3.5-turbo', 'gpt-4o']
+        supported_models = ['gpt-3.5-turbo', 'gpt-4o', 'gpt-4o-mini']
 
         # Check if the provided model is within the supported models
         if self.model not in supported_models:
