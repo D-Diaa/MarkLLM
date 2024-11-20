@@ -8,7 +8,7 @@ from tqdm import tqdm
 folder = "evaluation/results"
 files = tqdm(list(os.listdir(folder)))
 for file in files:
-    if file.endswith(".json"):
+    if file.endswith(".json") and "final" in file:
         with open(os.path.join(folder, file), "r") as f:
             data = json.load(f)
         file = file.replace(".json", "")
@@ -22,10 +22,6 @@ for file in files:
             "Paraphrase(GPT3.5)": ('o', 'blue'),
             "Paraphrase(GPT4o)": ('s', 'blue'),
 
-            # Unigram with same color but different symbols
-            "Paraphrase(models/Unigram/meta-llama/Llama-3.2-3B-Instruct)": ('o', 'green'),
-            "Paraphrase(models/Unigram/Qwen/Qwen2.5-3B-Instruct)": ('s', 'green'),
-
             # Unigram_New with same color but different symbols
             "Paraphrase(models/Unigram_new/meta-llama/Llama-3.2-3B-Instruct)": ('o', 'orange'),
             "Paraphrase(models/Unigram_new/Qwen/Qwen2.5-3B-Instruct)": ('s', 'orange'),
@@ -34,7 +30,7 @@ for file in files:
             "Paraphrase(models/dpo_qwen_3_exponential)": ('*', 'purple'),
 
             # Other Paraphrase models in the same color but different symbols
-            "Paraphrase(meta-llama/Llama-3.1-8B-Instruct)": ('^', 'red'),
+            "Paraphrase(meta-llama/Llama-3.2-3B-Instruct)": ('^', 'red'),
             "Paraphrase(Qwen/Qwen2.5-3B-Instruct)": ('v', 'red'),
 
             # None as its own class
