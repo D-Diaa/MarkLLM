@@ -19,12 +19,27 @@
 
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import sacrebleu
 import torch
 
 from exceptions.exceptions import InvalidAnswerError
 from utils.openai_utils import OpenAIAPI
+
+cot_system_prompt = """Please act as an impartial judge and evaluate the quality of the response provided by 
+        an AI assistant to the user question displayed below. Your evaluation hinges on the following factors: 
+        accuracy, level of details, typographical correctness, grammatical correctness and lexical correctness. Be as 
+        objective as possible, and account for every one of these criteria in our evaluation. Begin your evaluation 
+        by providing a very short explanation. After providing your explanation, please rate the response on a scale of 
+        1 to 100 by strictly following this format: "[[rating]]", for example: "Rating: [[51]]". Your rating must come 
+        AFTER your explanation, not before."""
+system_prompt = """ You are given a prompt and a response, and you provide a 
+        grade out of 100 measuring the quality of the response, in terms of accuracy, level of details, and 
+        typographical, grammatical and lexical correctness. Remove points as soon as one of the criteria is missed. 
+        please rate the response on a scale of 1 to 100 by strictly following this format: "[[rating]]", 
+        for example: "Rating: [[51]]".
+        """
 
 
 class TextQualityAnalyzer:
@@ -44,7 +59,7 @@ class DirectTextQualityAnalyzer(TextQualityAnalyzer):
     """Base class for direct text quality analyzer."""
 
     def __init__(self) -> None:
-        pass
+        super().__init__()
 
     def analyze(self, text: str):
         pass
@@ -57,7 +72,7 @@ class ReferencedTextQualityAnalyzer(TextQualityAnalyzer):
     """Base class for referenced text quality analyzer."""
 
     def __init__(self) -> None:
-        pass
+        super().__init__()
 
     def analyze(self, text: str, reference):
         pass
@@ -70,13 +85,15 @@ class ExternalDiscriminatorTextQualityAnalyzer(TextQualityAnalyzer):
     """Base class for external discriminator text quality analyzer."""
 
     def __init__(self) -> None:
-        pass
+        super().__init__()
 
     def analyze(self, text1: str, text2: str, description: str):
         pass
 
     def analyze_batched(self, texts1: list, texts2: list, descriptions: list):
-        return [self.analyze(text1, text2, description) for text1, text2, description in zip(texts1, texts2, descriptions)]
+        return [self.analyze(text1, text2, description) for text1, text2, description in
+                zip(texts1, texts2, descriptions)]
+
 
 class PPLCalculator(DirectTextQualityAnalyzer):
     """Perplexity calculator for text quality analysis."""
@@ -90,6 +107,7 @@ class PPLCalculator(DirectTextQualityAnalyzer):
                 tokenizer: The tokenizer for the language model.
                 device (str): The device to use for the calculation.
         """
+        super().__init__()
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -155,7 +173,7 @@ class LogDiversityAnalyzer(DirectTextQualityAnalyzer):
 
         # Overall diversity is the product of individual n-gram diversities
         overall_diversity = (1 - diversity_scores[0] / 100) * (1 - diversity_scores[1] / 100) * (
-                    1 - diversity_scores[2] / 100)
+                1 - diversity_scores[2] / 100)
         log_diversity = -math.log(max(1 - overall_diversity, math.exp(-20)))
 
         return log_diversity
@@ -237,6 +255,62 @@ class GPTTextDiscriminator(ExternalDiscriminatorTextQualityAnalyzer):
         return eval(answer)
 
 
+class GPTTextRater(ReferencedTextQualityAnalyzer):
+    """GPT text discriminator for text quality analysis."""
+
+    def __init__(self, openai_model: str = "gpt-3.5-turbo", cot: bool = False) -> None:
+        """
+            Initialize the GPT text rater.
+
+            Parameters:
+                openai_model (str): The OpenAI model to use for text rating.
+                cot (bool): Whether to use the COT format for rating.
+        """
+        super().__init__()
+        self.num_regex = re.compile(r"([0-9]+\.*[0-9]*)(/100)?")
+        self.openai_model = openai_model
+        self.cot = cot
+        self.system_prompt = cot_system_prompt if cot else system_prompt
+        self.instruction = "Prompt:\n{}\nResponse:\n{}"
+        self.response = "<analysis>" if cot else "Rating: "
+
+    def _get_query(self, text: str, prompt: str):
+        """Get the query for text rating."""
+        return self.instruction.format(prompt, text)
+
+    def analyze(self, text: str, reference):
+        """Analyze the text to determine its quality."""
+        openai_util = OpenAIAPI(model=self.openai_model, temperature=0.2, system_content=self.system_prompt)
+        query = self._get_query(text, reference)
+        answer = openai_util.get_result(query)
+        return self.extract_rating(answer)
+
+    def extract_rating(self, text: str):
+        rating = 0.0
+        matches = re.findall(self.num_regex, text)
+        if matches and len(matches):
+            val = matches[-1][0].replace("[", "").replace("]", "")
+            if "/" in val:
+                rating = float(val.split("/")[0]) / float(
+                    val.split("/")[1]
+                )
+            else:
+                rating = float(val) / 100
+
+        rating = max(min(rating, 1), 0)
+        return rating
+
+    def analyze_batched(self, texts: list, references: list):
+        def analyze_single(text, reference):
+            return self.analyze(text, reference)
+
+        # Use ThreadPoolExecutor for parallel execution
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(analyze_single, texts, references))
+
+        return results
+
+
 class LLMTextRater(ReferencedTextQualityAnalyzer):
     """LLM text discriminator for text quality analysis."""
 
@@ -254,18 +328,7 @@ class LLMTextRater(ReferencedTextQualityAnalyzer):
         self.tokenizer = tokenizer
         self.device = device
         self.model.to(self.device)
-        self.system_prompt = """Please act as an impartial judge and evaluate the quality of the response provided by 
-        an AI assistant to the user question displayed below. Your evaluation hinges on the following factors: 
-        accuracy, level of details, typographical correctness, grammatical correctness and lexical correctness. Be as 
-        objective as possible, and account for every one of these criteria in our evaluation. Begin your evaluation 
-        by providing a very short explanation. After providing your explanation, please rate the response on a scale of 
-        1 to 100 by strictly following this format: "[[rating]]", for example: "Rating: [[51]]". Your rating must come 
-        AFTER your explanation, not before.""" if cot else """ You are given a prompt and a response, and you provide a 
-        grade out of 100 measuring the quality of the response, in terms of accuracy, level of details, and 
-        typographical, grammatical and lexical correctness. Remove points as soon as one of the criteria is missed. 
-        please rate the response on a scale of 1 to 100 by strictly following this format: "[[rating]]", 
-        for example: "Rating: [[51]]".
-        """
+        self.system_prompt = cot_system_prompt if cot else system_prompt
         self.instruction = f"Prompt:\n{{}}\nResponse:\n{{}}"
         self.response = "<analysis>" if cot else "Rating: "
         self.num_regex = re.compile(r"([0-9]+\.*[0-9]*)(/100)?")
@@ -303,10 +366,11 @@ class LLMTextRater(ReferencedTextQualityAnalyzer):
                 rating = float(val) / 100
 
         rating = max(min(rating, 1), 0)
+        torch.cuda.empty_cache()
         return rating
 
     def analyze_batched(self, texts: list, references: list):
-        prompts =[
+        prompts = [
             self.tokenizer.apply_chat_template(
                 [
                     {"role": "system", "content": self.system_prompt},
@@ -343,4 +407,5 @@ class LLMTextRater(ReferencedTextQualityAnalyzer):
 
             rating = max(min(rating, 1), 0)
             ratings.append(rating)
+        torch.cuda.empty_cache()
         return ratings
