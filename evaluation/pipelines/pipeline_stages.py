@@ -30,7 +30,7 @@ class Response:
     watermark_detected: bool = False
     is_watermarked: bool = False
     edit_sequence: List[str] = field(default_factory=list)
-    watermark_score: float = None
+    watermark_score: Optional[float] = None
     ratings: Dict[str, float] = field(default_factory=dict)
 
 
@@ -119,16 +119,20 @@ class GenerationStage(PipelineStage):
 
 
 class EditingStage(PipelineStage):
-    """Stage for applying edit sequences to texts"""
+    """Stage for applying edit sequences to texts in parallel using threads"""
 
     def __init__(self, input_queue: Queue, output_queue: Queue,
                  batch_size: int, total_items: int,
                  edit_sequences: Dict[str, List[TextEditor]],
+                 max_workers: int = None,
                  show_progress: bool = True):
         super().__init__(input_queue, output_queue, batch_size, total_items,
                          "Editing", show_progress)
         self.edit_sequences = edit_sequences
         self.non_watermarked_edit_sequence = [TruncatePromptTextEditor()]
+        # Count number of paraphrase sequences for default max_workers
+        paraphrase_count = sum(1 for name in edit_sequences.keys() if 'Paraphrase' in name)
+        self.max_workers = max_workers or paraphrase_count
 
     def _apply_edit_sequence_batched(
             self,
@@ -142,64 +146,6 @@ class EditingStage(PipelineStage):
             edited_texts = editor.edit_batch(edited_texts, prompts)
 
         return edited_texts
-
-    def edit_batch(self, batch: List[Response], editors: List[TextEditor], seq_name: str) -> List[Response]:
-        edited_responses = []
-        edited_batch = self._apply_edit_sequence_batched(
-            [r.text for r in batch],
-            [r.prompt for r in batch],
-            editors,
-        )
-        for i, edited_text in enumerate(edited_batch):
-            if isinstance(edited_text, list):
-                # Handle one-to-many edits
-                for et in edited_text:
-                    response = replace(batch[i], text=et, edit_sequence=[seq_name])
-                    edited_responses.append(response)
-            else:
-                response = replace(batch[i], text=edited_text, edit_sequence=[seq_name])
-                edited_responses.append(response)
-        return edited_responses
-
-    def apply_edits(
-            self,
-            responses: List[Response],
-            apply_non_watermarked: bool = False
-    ) -> List[Response]:
-        """Apply all edit sequences to the responses"""
-        edited_responses = []
-        edit_sequences = self.edit_sequences if not apply_non_watermarked else {
-            'none': self.non_watermarked_edit_sequence
-        }
-        # Apply each edit sequence
-        batched_responses = [responses[i:i + self.batch_size] for i in range(0, len(responses), self.batch_size)]
-        for seq_name, editors in edit_sequences.items():
-            for batch in batched_responses:
-                edited_batch = self.edit_batch(batch, editors, seq_name)
-                edited_responses.extend(edited_batch)
-        return edited_responses
-
-    def process_batch(self, batch: List[Response]) -> List[Response]:
-        watermarked_batch = [r for r in batch if r.is_watermarked]
-        unwatermarked_batch = [r for r in batch if not r.is_watermarked]
-        edited_watermarked = self.apply_edits(watermarked_batch)
-        edited_unwatermarked = self.apply_edits(unwatermarked_batch, apply_non_watermarked=True)
-        return edited_watermarked + edited_unwatermarked
-
-
-class ParallelEditingStage(EditingStage):
-    """Stage for applying edit sequences to texts in parallel using threads"""
-
-    def __init__(self, input_queue: Queue, output_queue: Queue,
-                 batch_size: int, total_items: int,
-                 edit_sequences: Dict[str, List[TextEditor]],
-                 max_workers: int = None,
-                 show_progress: bool = True):
-        super().__init__(input_queue, output_queue, batch_size, total_items,
-                         edit_sequences, show_progress)
-        # Count number of paraphrase sequences for default max_workers
-        paraphrase_count = sum(1 for name in edit_sequences.keys() if 'Paraphrase' in name)
-        self.max_workers = max_workers or paraphrase_count
 
     def process_edit_sequence(self, responses: List[Response],
                               seq_name: str,
@@ -309,6 +255,33 @@ class DetectionStage(PipelineStage):
         return detected_responses
 
 
+def process_metric(metric_name, analyzer, dataset, batch, use_dataset_prompts):
+    if isinstance(analyzer, (LLMTextRater, GPTTextRater)):
+        if hasattr(dataset, 'raw_prompts') and use_dataset_prompts:
+            prompts = [dataset.raw_prompts[r.id][0] for r in batch]
+            modified_batch = [replace(r, prompt=p) for r, p in zip(batch, prompts)]
+        else:
+            modified_batch = batch
+
+        prompts = [r.prompt for r in modified_batch]
+        texts = [r.text for r in modified_batch]
+        scores = analyzer.analyze_batched(texts, prompts)
+
+    elif isinstance(analyzer, ReferencedTextQualityAnalyzer):
+        references = [dataset.get_reference(r.id) for r in batch]
+        texts = [r.text for r in batch]
+        scores = analyzer.analyze_batched(texts, references)
+
+    elif isinstance(analyzer, DirectTextQualityAnalyzer):
+        texts = [r.text for r in batch]
+        scores = analyzer.analyze_batched(texts)
+
+    else:
+        raise ValueError(f"Unsupported analyzer type: {type(analyzer)}")
+
+    return metric_name, scores
+
+
 class RatingStage(PipelineStage):
     """Stage for computing quality ratings"""
 
@@ -322,6 +295,29 @@ class RatingStage(PipelineStage):
         self.dataset = dataset
         self.use_dataset_prompts = use_dataset_prompts
 
+    def compute_ratings_multithreaded(self, batch):
+        ratings = {}
+        with ThreadPoolExecutor(max_workers=len(self.rating_metrics)) as executor:
+            # Prepare futures
+            futures = {
+                executor.submit(
+                    process_metric,
+                    metric_name,
+                    analyzer,
+                    self.dataset,
+                    batch,
+                    self.use_dataset_prompts
+                ): metric_name
+                for metric_name, analyzer in self.rating_metrics.items()
+            }
+
+            # Collect results as they complete
+            for future in as_completed(futures):
+                metric_name, scores = future.result()
+                ratings[metric_name] = scores
+
+        return ratings
+
     def compute_ratings(
             self,
             responses: List[Response]
@@ -330,35 +326,17 @@ class RatingStage(PipelineStage):
         batched_responses = [responses[i:i + self.batch_size] for i in range(0, len(responses), self.batch_size)]
         rated_responses = []
         for batch in batched_responses:
-            ratings = {}
-            for metric_name, analyzer in self.rating_metrics.items():
-                # Handle different analyzer types
-                if isinstance(analyzer, LLMTextRater) or isinstance(analyzer, GPTTextRater):
-                    if hasattr(self.dataset, 'raw_prompts') and self.use_dataset_prompts:
-                        prompts = [self.dataset.raw_prompts[r.id][0] for r in batch]
-                        batch = [replace(r, prompt=p) for r, p in zip(batch, prompts)]
-                    prompts = [r.prompt for r in batch]
-                    scores = analyzer.analyze_batched([r.text for r in batch], prompts)
-                elif isinstance(analyzer, ReferencedTextQualityAnalyzer):
-                    # For referenced analyzers
-                    references = [self.dataset.get_reference(r.id) for r in batch]
-                    scores = analyzer.analyze_batched([r.text for r in batch], references)
-                elif isinstance(analyzer, DirectTextQualityAnalyzer):
-                    # For direct analyzers
-                    scores = analyzer.analyze_batched([r.text for r in batch])
-                else:
-                    raise ValueError(f"Unsupported analyzer type: {type(analyzer)}")
-                ratings[metric_name] = scores
+            ratings = self.compute_ratings_multithreaded(batch)
             for i, response in enumerate(batch):
                 sample_ratings = {metric_name: scores[i] for metric_name, scores in ratings.items()}
-                sample_ratings.update(response.ratings)
-                rated_response = replace(response, ratings=sample_ratings)
+                original_ratings = response.ratings
+                original_ratings.update(sample_ratings)
+                rated_response = replace(response, ratings=original_ratings)
                 rated_responses.append(rated_response)
         return rated_responses
 
     def process_batch(self, batch: List[Response]) -> List[Response]:
-        rated_responses = self.compute_ratings(batch)
-        return rated_responses
+        return self.compute_ratings(batch)
 
 
 class SavingStage(PipelineStage):
