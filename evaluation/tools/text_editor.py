@@ -17,22 +17,32 @@
 # Description: Edit text using various techniques
 # ================================================
 
-import re
 import copy
-import nltk
-import torch
 import random
+import re
+
+import nltk
 import numpy as np
-from tqdm import tqdm
+import torch
 from nltk import pos_tag
 from nltk.corpus import wordnet
-from translate import Translator
-from nltk.tokenize import word_tokenize
 from nltk.tokenize import sent_tokenize
-from utils.openai_utils import OpenAIAPI
-from exceptions.exceptions import DiversityValueError
-from evaluation.tools.oracle import QualityOracle
+from nltk.tokenize import word_tokenize
+from tqdm import tqdm
 from transformers import T5Tokenizer, T5ForConditionalGeneration, BertTokenizer, BertForMaskedLM
+from translate import Translator
+
+from evaluation.tools.oracle import QualityOracle
+from exceptions.exceptions import DiversityValueError
+from utils.openai_utils import OpenAIAPI
+
+system_prompt = (
+    "You are an expert copy-editor. Please rewrite the following text in your own voice and paraphrase all "
+    "sentences.\n Ensure that the final output contains the same information as the original text and has "
+    "roughly the same length.\n Do not leave out any important details when rewriting in your own voice. Do "
+    "not include any information that is not present in the original text. Do not respond with a greeting or "
+    "any other extraneous information. Skip the preamble. Just rewrite the text directly."
+)
 
 
 class TextEditor:
@@ -221,18 +231,11 @@ class GPTParaphraser(TextEditor):
         super().__init__()
         self.openai_model = openai_model
         self.prompt = "[[START OF TEXT]]\n{}\n[[END OF TEXT]]"
-        self.system_prompt = (
-            "You are an expert copy-editor. Please rewrite the following text in your own voice and paraphrase all "
-            "sentences.\n Ensure that the final output contains the same information as the original text and has "
-            "roughly the same length.\n Do not leave out any important details when rewriting in your own voice. Do "
-            "not include any information that is not present in the original text. Do not respond with a greeting or "
-            "any other extraneous information. Skip the preamble. Just rewrite the text directly."
-        )
 
     def edit(self, text: str, reference=None):
         """Paraphrase the text using the GPT model."""
         openai_util = OpenAIAPI(model=self.openai_model, temperature=0.2,
-                                system_content=self.system_prompt)
+                                system_content=system_prompt)
         paraphrased_text = openai_util.get_result(self.prompt.format(text))
         return paraphrased_text
 
@@ -240,7 +243,7 @@ class GPTParaphraser(TextEditor):
 class LLMParaphraser(TextEditor):
     """Paraphrase a text using the LLM model."""
 
-    def __init__(self, model, tokenizer, device='cuda', max_length=1024, **kwargs):
+    def __init__(self, model, tokenizer, device='cuda', **kwargs):
         """
             Initialize the LLM paraphraser.
 
@@ -254,56 +257,28 @@ class LLMParaphraser(TextEditor):
         self.model = model.eval()
         self.tokenizer = tokenizer
         self.device = device
-        self.max_length = max_length
         self.gen_kwargs = {}
-        self.system_prompt = (
-            "You are an expert copy-editor. Please rewrite the following text in your own voice and paraphrase all sentences.\n"
-            "Ensure that the final output contains the same information as the original text and has roughly the same length.\n"
-            "Do not leave out any important details when rewriting in your own voice. Do not include any information that is not"
-            "present in the original text. Do not respond with a greeting or any other extraneous information. "
-            "Skip the preamble. Just rewrite the text directly."
-        )
         self.instruction = "\n[[START OF TEXT]]\n{}\n[[END OF TEXT]]"
         self.response = "[[START OF PARAPHRASE]]\n"
         self.gen_kwargs.update(kwargs)
 
-    def edit(self, text: str, reference=None):
-        """Paraphrase the text using the LLM model."""
-        # Prepare the input for the model
-        prompt = self.tokenizer.apply_chat_template(
+    def get_prompts(self, texts):
+        return [self.tokenizer.apply_chat_template(
             [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": self.instruction.format(text)},
             ],
             tokenize=False,
             add_generation_prompt=True,
         ) + self.response
-        # Tokenize the input
-        final_input = self.tokenizer([prompt], return_tensors="pt")
-        final_input = {k: v.to(self.device) for k, v in final_input.items()}
+                for text in texts]
 
-        # Generate the edited text
-        with torch.inference_mode():
-            outputs = self.model.generate(**final_input, **self.gen_kwargs)
-        outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-        # Extract the paraphrased text
-        output = outputs[0].split("[[START OF PARAPHRASE]]")[1].split("[[END OF")[0].strip()
-
-        return output
+    def edit(self, text: str, reference=None):
+        """Paraphrase the text using the LLM model."""
+        return self.edit_batch([text], [reference])[0]
 
     def edit_batch(self, texts: list, references=None):
-        prompts = [
-            self.tokenizer.apply_chat_template(
-                [
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": self.instruction.format(text)},
-                ],
-                tokenize=False,
-                add_generation_prompt=True,
-            ) + self.response
-            for text in texts
-        ]
+        prompts = self.get_prompts(texts)
         final_inputs = self.tokenizer(prompts, return_tensors="pt", padding=True)
         final_input = {k: v.to(self.device) for k, v in final_inputs.items()}
         with torch.inference_mode():
