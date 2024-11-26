@@ -18,8 +18,10 @@
 # ================================================
 
 import copy
+import multiprocessing
 import random
 import re
+from multiprocessing import Process, Manager
 
 import nltk
 import numpy as np
@@ -29,13 +31,15 @@ from nltk.corpus import wordnet
 from nltk.tokenize import sent_tokenize
 from nltk.tokenize import word_tokenize
 from tqdm import tqdm
-from transformers import T5Tokenizer, T5ForConditionalGeneration, BertTokenizer, BertForMaskedLM
+from transformers import T5Tokenizer, T5ForConditionalGeneration, BertTokenizer, BertForMaskedLM, set_seed
 from translate import Translator
 
 from evaluation.tools.oracle import QualityOracle
+from evaluation.utils import ModelConfig, ModelLoader
 from exceptions.exceptions import DiversityValueError
 from utils.openai_utils import OpenAIAPI
 
+multiprocessing.set_start_method('spawn', force=True)
 system_prompt = (
     "You are an expert copy-editor. Please rewrite the following text in your own voice and paraphrase all "
     "sentences.\n Ensure that the final output contains the same information as the original text and has "
@@ -240,10 +244,64 @@ class GPTParaphraser(TextEditor):
         return paraphrased_text
 
 
+def edit_batch(prompts, model, tokenizer, gen_kwargs):
+    final_inputs = tokenizer(prompts, return_tensors="pt", padding=True)
+    final_input = {k: v.to(model.device) for k, v in final_inputs.items()}
+    with torch.inference_mode():
+        set_seed(42)
+        outputs = model.generate(**final_input, **gen_kwargs)
+    outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+    paraphrased_texts = [
+        output.split("[[START OF PARAPHRASE]]")[1].split("[[END OF")[0].strip()
+        for output in outputs
+    ]
+    if "num_return_sequences" in gen_kwargs and gen_kwargs["num_return_sequences"] > 1:
+        # split into list of lists
+        batch_size = gen_kwargs["num_return_sequences"]
+        return [
+            paraphrased_texts[st:st + batch_size]
+            for st in range(0, len(paraphrased_texts), batch_size)
+        ]
+    return paraphrased_texts
+
+
+def get_prompts(texts, instruction, response, tokenizer):
+    return [
+        tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": instruction.format(text)},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        ) + response
+        for text in texts]
+
+
+def llm_server(model_config: ModelConfig, task_queue, result_queue, kwargs):
+    loader = ModelLoader(model_config)
+    adapter_ratio = kwargs.pop('adapter_ratio', 1.0)
+    model, tokenizer = loader.load(adapter_ratio=adapter_ratio)
+    instruction = "\n[[START OF TEXT]]\n{}\n[[END OF TEXT]]"
+    response = "[[START OF PARAPHRASE]]\n"
+    while True:
+        try:
+            task = task_queue.get()
+            if task is None:
+                break
+            prompts = get_prompts(task, instruction, response, tokenizer)
+            paraphrased_texts = edit_batch(prompts, model, tokenizer, kwargs)
+            result_queue.put(paraphrased_texts)
+        except Exception as e:
+            print(e)
+            break
+
+
 class LLMParaphraser(TextEditor):
     """Paraphrase a text using the LLM model."""
 
-    def __init__(self, model, tokenizer, device='cuda', **kwargs):
+    def __init__(self, model_config, **kwargs):
         """
             Initialize the LLM paraphraser.
 
@@ -254,48 +312,31 @@ class LLMParaphraser(TextEditor):
                 max_length (int): The maximum length of the output.
         """
         super().__init__()
-        self.model = model.eval()
-        self.tokenizer = tokenizer
-        self.device = device
+        self.model_config = model_config
+        self.manager = Manager()
+        self.task_queue = self.manager.Queue()
+        self.result_queue = self.manager.Queue()
         self.gen_kwargs = {}
-        self.instruction = "\n[[START OF TEXT]]\n{}\n[[END OF TEXT]]"
-        self.response = "[[START OF PARAPHRASE]]\n"
         self.gen_kwargs.update(kwargs)
+        self.server = Process(target=llm_server,
+                              args=(model_config, self.task_queue, self.result_queue, self.gen_kwargs))
 
-    def get_prompts(self, texts):
-        return [self.tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": self.instruction.format(text)},
-            ],
-            tokenize=False,
-            add_generation_prompt=True,
-        ) + self.response
-                for text in texts]
+        self.server.start()
+
+    def join(self):
+        self.task_queue.put(None)
+        self.server.join()
 
     def edit(self, text: str, reference=None):
         """Paraphrase the text using the LLM model."""
-        return self.edit_batch([text], [reference])[0]
+        self.task_queue.put([text])
+        paraphrased_texts = self.result_queue.get()
+        return paraphrased_texts[0]
 
     def edit_batch(self, texts: list, references=None):
-        prompts = self.get_prompts(texts)
-        final_inputs = self.tokenizer(prompts, return_tensors="pt", padding=True)
-        final_input = {k: v.to(self.device) for k, v in final_inputs.items()}
-        with torch.inference_mode():
-            outputs = self.model.generate(**final_input, **self.gen_kwargs)
-        outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-        paraphrased_texts = [
-            output.split("[[START OF PARAPHRASE]]")[1].split("[[END OF")[0].strip()
-            for output in outputs
-        ]
-        if "num_return_sequences" in self.gen_kwargs and self.gen_kwargs["num_return_sequences"] > 1:
-            # split into list of lists
-            batch_size = self.gen_kwargs["num_return_sequences"]
-            return [
-                paraphrased_texts[st:st + batch_size]
-                for st in range(0, len(paraphrased_texts), batch_size)
-            ]
+        """Paraphrase a batch of texts using the LLM model."""
+        self.task_queue.put(texts)
+        paraphrased_texts = self.result_queue.get()
         return paraphrased_texts
 
 
