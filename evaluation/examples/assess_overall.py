@@ -1,100 +1,18 @@
 import json
 import os
-from dataclasses import dataclass
 from typing import Dict, List
-from typing import Tuple
-
-import torch
-from peft import PeftModel, PeftConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer, BertTokenizer, BertForMaskedLM
 
 from evaluation.dataset import MarkMyWordsDataset
-from evaluation.pipelines.robustness import WatermarkRobustnessPipeline
-from evaluation.tools.text_editor import TruncatePromptTextEditor, WordDeletion, SynonymSubstitution, LLMParaphraser, \
+from evaluation.pipelines.robustness import WatermarkRobustnessPipeline, PipelineConfig
+from evaluation.tools.text_editor import TruncatePromptTextEditor, LLMParaphraser, \
     GPTParaphraser, ContextAwareSynonymSubstitution
-from evaluation.tools.text_quality_analyzer import LLMTextRater, PPLCalculator, GPTTextRater
+from evaluation.tools.text_quality_analyzer import GPTTextRater
+from evaluation.utils import ModelLoader, ModelConfig, _load_tokenizer
 from utils.transformers_config import TransformersConfig
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 NUM_PARAPHRASES = 8
-
-
-@dataclass
-class ModelConfig:
-    """Configuration for model loading and inference."""
-    model_name: str
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-    max_new_tokens: int = 256
-    do_sample: bool = True
-
-
-def _load_tokenizer(model_name: str) -> AutoTokenizer:
-    """Load tokenizer with error handling."""
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if tokenizer.pad_token is None:
-            tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
-        tokenizer.padding_side = "left"
-        return tokenizer
-    except Exception as e:
-        raise ValueError(f"Failed to load tokenizer {model_name}.") from e
-
-
-class ModelLoader:
-    """Handles loading and configuration of language models."""
-
-    def __init__(self, config: ModelConfig):
-        self.config = config
-        self.model = None
-        self.tokenizer = None
-
-    def load(self) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-        """Load model and tokenizer based on configuration."""
-        if self._is_adapter_model():
-            print("Loading model with PEFT adapter.")
-            self._load_adapter_model()
-        else:
-            print("Loading base model.")
-            self._load_base_model()
-        self.model.config.pad_token_id = self.tokenizer.pad_token_id
-        self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
-        return self.model, self.tokenizer
-
-    def _is_adapter_model(self) -> bool:
-        """Check if the model path contains an adapter configuration."""
-        model_path = self.config.model_name
-        adapter_config_path = os.path.join(model_path, 'adapter_config.json')
-        return (os.path.exists(model_path) and
-                not os.path.exists(os.path.join(model_path, 'config.json')) and
-                os.path.exists(adapter_config_path))
-
-    def _load_adapter_model(self):
-        """Load a model with PEFT adapter."""
-        peft_config = PeftConfig.from_pretrained(self.config.model_name)
-        base_model = self._load_model(peft_config.base_model_name_or_path)
-        self.model = PeftModel.from_pretrained(base_model, self.config.model_name)
-        self.tokenizer = _load_tokenizer(peft_config.base_model_name_or_path)
-
-    def _load_base_model(self):
-        """Load a base model without adapters."""
-        self.model = self._load_model(self.config.model_name)
-        self.tokenizer = _load_tokenizer(self.config.model_name)
-
-    def _load_model(self, model_name: str) -> AutoModelForCausalLM:
-        """Load model with error handling."""
-        try:
-            return AutoModelForCausalLM.from_pretrained(model_name).to(self.config.device)
-        except Exception as e:
-            raise ValueError(f"Failed to load model {model_name}.") from e
-
-    @classmethod
-    def from_name(cls, model_name: str, device: str = None) -> Dict:
-        """Create a model loader from model name and optional device."""
-        config = ModelConfig(model_name=model_name)
-        if device:
-            config.device = device
-        model, tokenizer = cls(config).load()
-        return {'model': model, 'tokenizer': tokenizer}
+MAX_NEW_TOKENS = 256
 
 
 class RobustnessPipelineFactory:
@@ -109,33 +27,49 @@ class RobustnessPipelineFactory:
                         filename: str = None
                         ) -> 'WatermarkRobustnessPipeline':
         """Create a pipeline with standard configuration."""
+        edit_sequences = {}
         if mode == 'gpt_judge':
             rating_metrics = {
                 "gpt_judge": GPTTextRater(openai_model='gpt-4o-mini', cot=True)
             }
-            edit_sequences = {}
             batch_size = 32
+        elif mode == 're_evaluate':
+            rating_metrics = RobustnessPipelineFactory._create_rating_metrics(self.devices[-3:])
+            batch_size = 128
         else:
-            rating_metrics = RobustnessPipelineFactory._create_rating_metrics(self.devices[-1])
+            rating_metrics = RobustnessPipelineFactory._create_rating_metrics(None)
+            batch_size = 16
+            devices = self.devices
             if mode == 'generate_only':
                 edit_sequences = {'none': [TruncatePromptTextEditor()]}
             elif mode == 'end_to_end':
-                edit_sequences = RobustnessPipelineFactory._create_edit_sequences(self.devices[:-1])
+                devices = devices[1:]
+                edit_sequences = RobustnessPipelineFactory._create_edit_sequences(devices)
             elif mode == 'add_edits':
-                edit_sequences = RobustnessPipelineFactory._create_extra_edit_sequences(self.devices[:-1])
+                edit_sequences = RobustnessPipelineFactory._create_extra_edit_sequences(devices)
             elif mode == 'base_paraphrase':
-                edit_sequences = RobustnessPipelineFactory._create_base_paraphrase_sequences(self.devices[:-1])
+                edit_sequences = RobustnessPipelineFactory._create_base_paraphrase_sequences(devices)
+            elif mode == 'ensemble_paraphrase':
+                model_names = ["models/Unigram_new/Qwen/Qwen2.5-3B-Instruct", 'models/dpo_qwen_3_exponential']
+                devices_per_model = len(devices) // len(model_names)
+                # lambda_weights = [0, 0.2, 0.4, 0.6, 0.8, 1]
+                lambda_weights = [0, 0.5, 1]
+                edit_sequences = {}
+                batch_size = 32
+                for i, model_name in enumerate(model_names):
+                    edit_sequences.update(
+                        RobustnessPipelineFactory._create_weighted_paraphraser_sequences(
+                            model_name, devices[i * devices_per_model:(i + 1) * devices_per_model], lambda_weights
+                        )
+                    )
             else:
                 raise ValueError(f"Invalid mode {mode}.")
-            batch_size = 16
-
-        return WatermarkRobustnessPipeline(
-            dataset=dataset,
-            edit_sequences=edit_sequences,
-            rating_metrics=rating_metrics,
-            filename=filename,
-            batch_size=batch_size
-        )
+        config = PipelineConfig(dataset=dataset,
+                                edit_sequences=edit_sequences,
+                                rating_metrics=rating_metrics,
+                                filename=filename,
+                                batch_size=batch_size)
+        return WatermarkRobustnessPipeline(config)
 
     @staticmethod
     def _create_extra_edit_sequences(devices: List[str]) -> Dict:
@@ -161,27 +95,38 @@ class RobustnessPipelineFactory:
         base_editor = TruncatePromptTextEditor()
         sequences = {
             'none': [base_editor],
-            'Word-D': [base_editor, WordDeletion(ratio=0.3)],
-            'Word-S': [base_editor, SynonymSubstitution(ratio=0.5)],
+            # 'Word-D': [base_editor, WordDeletion(ratio=0.3)],
+            # 'Word-S': [base_editor, SynonymSubstitution(ratio=0.5)],
             'Paraphrase(GPT3.5)': [GPTParaphraser('gpt-3.5-turbo')],
             'Paraphrase(GPT4o)': [GPTParaphraser('gpt-4o')]
         }
 
         # Add paraphrasers
-        paraphraser_models = [
-            ("models/Unigram_new/Qwen/Qwen2.5-3B-Instruct", devices[3]),
-            ("models/Unigram_new/meta-llama/Llama-3.2-3B-Instruct", devices[3]),
-            # ("models/Unigram/Qwen/Qwen2.5-3B-Instruct", devices[2]),
-            # ("models/Unigram/meta-llama/Llama-3.2-3B-Instruct", devices[2]),
-            ("Qwen/Qwen2.5-3B-Instruct", devices[1]),
-            ("models/dpo_qwen_3_exponential", devices[1]),
-            # ('meta-llama/Llama-3.1-8B-Instruct', devices[4]),
-            # ("models/dpo_llama_3_all", devices[2])
-        ]
+        # paraphraser_models = [
+        #     ("models/Unigram_new/Qwen/Qwen2.5-3B-Instruct", devices[1]),
+        #     ("models/Unigram_new/meta-llama/Llama-3.2-3B-Instruct", devices[3]),
+        #     ("models/Unigram/Qwen/Qwen2.5-3B-Instruct", devices[2]),
+        #     ("models/Unigram/meta-llama/Llama-3.2-3B-Instruct", devices[2]),
+        #     ("Qwen/Qwen2.5-3B-Instruct", devices[1]),
+        #     ("models/dpo_qwen_3_exponential", devices[2]),
+        #     ('meta-llama/Llama-3.1-8B-Instruct', devices[4]),
+        #     ("models/dpo_llama_3_all", devices[2])
+        # ]
+        #
+        # for model, device in paraphraser_models:
+        #     paraphraser = RobustnessPipelineFactory._create_paraphraser(model, device)
+        #     sequences[f'Paraphrase({model})'] = [base_editor, paraphraser]
 
-        for model, device in paraphraser_models:
-            paraphraser = RobustnessPipelineFactory._create_paraphraser(model, device)
-            sequences[f'Paraphrase({model})'] = [base_editor, paraphraser]
+        model_names = ["models/Unigram_new/Qwen/Qwen2.5-3B-Instruct", 'models/dpo_qwen_3_exponential']
+        devices_per_model = len(devices) // len(model_names)
+        # lambda_weights = [0, 0.2, 0.4, 0.6, 0.8, 1]
+        lambda_weights = [0, 0.2, 0.4, 0.6, 0.8, 1]
+        for i, model_name in enumerate(model_names):
+            sequences.update(
+                RobustnessPipelineFactory._create_weighted_paraphraser_sequences(
+                    model_name, devices[i * devices_per_model:(i + 1) * devices_per_model], lambda_weights
+                )
+            )
 
         return sequences
 
@@ -203,31 +148,81 @@ class RobustnessPipelineFactory:
     @staticmethod
     def _create_paraphraser(model_name: str, device: str, **kwargs) -> LLMParaphraser:
         """Create a paraphraser instance."""
-        model_dict = ModelLoader.from_name(model_name, device=device)
+
         return LLMParaphraser(
-            **model_dict,
-            device=device,
-            max_new_tokens=256,
+            model_config=ModelConfig(model_name=model_name, device=device),
+            max_new_tokens=MAX_NEW_TOKENS,
             do_sample=True,
             temperature=1.0,
             **kwargs
         )
 
     @staticmethod
-    def _create_rating_metrics(device: str) -> Dict:
+    def _create_weighted_paraphraser(model_name: str, device: str, weight: float, **kwargs) -> LLMParaphraser:
+        """Create a paraphraser instance."""
+        return LLMParaphraser(
+            model_config=ModelConfig(model_name=model_name, device=device),
+            adapter_ratio=weight,
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=True,
+            temperature=1.0,
+            **kwargs
+        )
+
+    @staticmethod
+    def _create_weighted_paraphraser_sequences(model_name: str, devices: List[str], weights: List[int], **kwargs):
+        sequences = {}
+        for i, weight in enumerate(weights):
+            idx = i % len(devices)
+            sequences[f'Paraphrase({model_name})_{weight}'] = [
+                RobustnessPipelineFactory._create_weighted_paraphraser(
+                    model_name, devices[idx], weight, **kwargs
+                )
+            ]
+        return sequences
+
+    @staticmethod
+    def _create_ensemble_paraphrasers(model_name: str, devices: List[str], lambda_weights: List[int], **kwargs):
+        model_dicts = [ModelLoader.from_name(model_name, device=device) for device in devices]
+        base_model_name = model_dicts[0]['model'].config.name_or_path
+        base_model_dicts = [ModelLoader.from_name(base_model_name, device=device) for device in devices]
+        paraphrasers = {}
+        for i, lambda_weight in enumerate(lambda_weights):
+            idx = i % len(devices)
+            paraphrasers[f'Paraphrase({model_name})_{lambda_weight}'] = [
+                RobustnessPipelineFactory._create_ensemble_paraphraser(
+                    model_dicts[idx], base_model_dicts[idx], devices[idx], lambda_weight, **kwargs
+                )
+            ]
+
+        return paraphrasers
+
+    @staticmethod
+    def _create_rating_metrics(devices: List[str]) -> Dict:
         """Create standard set of rating metrics."""
-        rating_model = ModelLoader.from_name('meta-llama/Llama-3.1-8B-Instruct', device=device)
+        # rating_models = [ModelLoader.from_name('meta-llama/Llama-3.1-8B-Instruct', device=device) for device in devices]
+
         return {
-            "llm_judge": LLMTextRater(
-                **rating_model,
-                device=device,
-                cot=False,
-                max_new_tokens=32,
-                do_sample=False,
-                top_p=None,
-                temperature=None
-            ),
-            "ppl": PPLCalculator(**rating_model, device=device)
+            # "llm_judge": LLMTextRater(
+            #     **rating_models[0],
+            #     device=devices[0],
+            #     cot=False,
+            #     max_new_tokens=MAX_NEW_TOKENS,
+            #     do_sample=False,
+            #     top_p=None,
+            #     temperature=None
+            # ),
+            # "ppl": PPLCalculator(**rating_models[1], device=devices[1]),
+            # "llm_cot": LLMTextRater(
+            #     **rating_models[2],
+            #     device=devices[2],
+            #     cot=True,
+            #     max_new_tokens=1024,
+            #     do_sample=False,
+            #     top_p=None,
+            #     temperature=None
+            # ),
+            "gpt_judge": GPTTextRater(openai_model='gpt-4o-mini', cot=True)
         }
 
 
@@ -242,7 +237,8 @@ def main():
         '--mode',
         type=str,
         default='end_to_end',
-        choices=['end_to_end', 'generate_only', 'add_edits', 'base_paraphrase', 'gpt_judge']
+        choices=['end_to_end', 'generate_only', 'add_edits', 'base_paraphrase', 'gpt_judge', 'ensemble_paraphrase',
+                 're_evaluate']
     )
     parser.add_argument(
         '--dataset',
@@ -311,18 +307,13 @@ def main():
             filename=f'{directory}/{args.algorithm}{suff}{hash_key}.tsv'
         )
         if args.mode in ['generate_only', 'end_to_end']:
-            stats = pipeline.evaluate(watermark_args)
-        elif args.mode == "gpt_judge":
-            stats = pipeline.add_quality(f'{directory}/{args.algorithm}_final{hash_key}.tsv')
+            pipeline.evaluate(watermark_args)
+        elif args.mode in ['gpt_judge', 're_evaluate']:
+            pipeline.add_quality(f'{directory}/{args.algorithm}_new{hash_key}.tsv')
         else:
             if args.mode == 'base_paraphrase':
-                pipeline.edit_expansion = len(pipeline.edit_sequences) * NUM_PARAPHRASES
-            stats = pipeline.add_edits(f'{directory}/{args.algorithm}_gen{hash_key}.tsv', watermark_args)
-
-        # Save results
-        os.makedirs('evaluation/results', exist_ok=True)
-        with open(f'{directory}/{args.algorithm}{suff}{hash_key}.json', 'w') as f:
-            json.dump(stats.summary_statistics, f)
+                pipeline.edit_expansion = len(pipeline.config.edit_sequences) * NUM_PARAPHRASES
+            pipeline.add_edits(f'{directory}/{args.algorithm}_finaleval{hash_key}.tsv', watermark_args)
 
 
 if __name__ == '__main__':

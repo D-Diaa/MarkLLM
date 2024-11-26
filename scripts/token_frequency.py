@@ -1,3 +1,4 @@
+import os
 from collections import Counter
 from typing import List, Tuple
 
@@ -7,7 +8,6 @@ import seaborn as sns
 from transformers import AutoTokenizer
 
 from evaluation.pipelines.pipeline_stages import ResponseLoader
-
 
 class TokenFrequencyAnalyzer:
     def __init__(self, tokenizer_name: str = 'bert-base-uncased'):
@@ -112,7 +112,7 @@ class TokenFrequencyAnalyzer:
             plt.style.use('default')
 
         # Get top tokens across all collections
-        top_tokens = self.get_top_tokens_across_collections(text_collections, top_n)
+        top_tokens = self.get_top_tokens_across_collections(text_collections[0:1], top_n)
 
         # Get counts for each collection
         collection_counts = []
@@ -150,6 +150,11 @@ class TokenFrequencyAnalyzer:
 
         # Customize the plot
         ax.set_xticks(x)
+        #x-axis font size
+        plt.xticks(fontsize=16)
+        #y-axis font size
+        plt.yticks(fontsize=16)
+
 
         # Clean up token display
         display_tokens = []
@@ -165,12 +170,11 @@ class TokenFrequencyAnalyzer:
         # Add some padding at the bottom for the labels
         plt.subplots_adjust(bottom=0.2)
 
-        ax.set_xlabel('Tokens')
-        ax.set_ylabel('Frequency' if not normalize else 'Normalized Frequency')
-        ax.set_title(f'Top {top_n} Token Frequencies Across Collections')
+        ax.set_xlabel('Tokens', fontsize=16)
+        ax.set_ylabel('Frequency' if not normalize else 'Normalized Frequency', fontsize=16)
         ax.set_yscale('log')
         ax.grid(True, alpha=0.3)
-        ax.legend()
+        ax.legend(fontsize=16)
 
         # Add subtle grid lines
         ax.grid(True, linestyle='--', alpha=0.2)
@@ -181,27 +185,38 @@ class TokenFrequencyAnalyzer:
         return fig
 
 
-# Example usage
-if __name__ == "__main__":
-    # Example text collections
-    filename = "evaluation/results/KGW_editcontd15485863.tsv"
-    top_n = 50
-    loader = ResponseLoader(filename)
-    responses = loader.load_all()
-    labels = set([response.edit_sequence[0] for response in responses if response.is_watermarked and
-                  ("Paraphrase" in response.edit_sequence[0] or "none" in response.edit_sequence[0])])
-    labels = list(labels)
-
-    collections = [
-        [response.text.split("[[END OF")[0].strip() for response in responses if response.edit_sequence == [label]]
-        for label in labels
-    ]
-    collections.append([response.text.strip() for response in responses if not response.is_watermarked])
-    labels.append("unwatermarked")
-    # Create analyzer
-    analyzer = TokenFrequencyAnalyzer('meta-llama/Llama-3.1-8B-Instruct')
-    colors = sns.color_palette("tab10", n_colors=len(labels))
-
+#%%
+directory = "evaluation/results"
+top_n = 50
+file = "Unigram_new_reevaluated123456.tsv"
+filename = os.path.join(directory, file)
+loader = ResponseLoader(filename)
+responses = loader.load_all()
+labels = set([response.edit_sequence[0] for response in responses if response.is_watermarked])
+#%%
+base = ['none']
+against = [
+    'Paraphrase(models/dpo_qwen_3_exponential)_0',
+    'Paraphrase(models/Unigram_new/Qwen/Qwen2.5-3B-Instruct)_1',
+    'Paraphrase(models/dpo_qwen_3_exponential)_1',
+    'Paraphrase(GPT4o)',
+    'Paraphrase(GPT3.5)'
+]
+names = ['Qwen-3b', 'Ours-Qwen-3b-Unigram', 'Ours-Qwen-3b-Exp', 'GPT4o', 'GPT3.5']
+base_collection = [response.text.strip() for response in responses if response.edit_sequence == base]
+against_collections = [
+    [response.text.strip() for response in responses if response.edit_sequence == [label]]
+    for label in against
+]
+against_labels = names
+base_name = 'Original'
+#%%
+# Create analyzer
+analyzer = TokenFrequencyAnalyzer('meta-llama/Llama-3.1-8B-Instruct')
+colors = sns.color_palette("tab10", n_colors=len(labels))
+for i, collection in enumerate(against_collections):
+    labels = [base_name, against_labels[i]]
+    collections = [base_collection, collection]
     # Create bar plot
     fig = analyzer.create_comparison_plot(
         collections,
@@ -210,7 +225,10 @@ if __name__ == "__main__":
         top_n=top_n,
         plot_type='bar',
         figsize=(20, 10),
-        alpha=0.8
+        alpha=1
     )
     plt.figure(fig.number)
+    plt.tight_layout()
+    name = f"{file.replace('.tsv', '')}_{against_labels[i]}_token_frequency.pdf"
+    plt.savefig(os.path.join(directory, name))
     plt.show()

@@ -3,8 +3,8 @@ datasets
 nltk
 jieba
 accelerate
-SentencePiece
-openai==0.28
+sentencepiece
+openai
 matplotlib
 Cython
 Pillow==9.4.0

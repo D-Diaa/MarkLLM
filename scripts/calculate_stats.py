@@ -45,7 +45,7 @@ def get_summary_stats(filename: str = None, reverse=None) -> Dict[str, Any]:
 folder = "evaluation/results"
 files = tqdm(list(os.listdir(folder)))
 for file in files:
-    if file.endswith(".tsv") and "ensemble" in file:
+    if file.endswith(".tsv") and "new" in file:
         file_path = os.path.join(folder, file)
         stats = get_summary_stats(filename=file_path)
         # remove tsv
