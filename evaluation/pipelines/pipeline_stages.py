@@ -15,7 +15,7 @@ from typing import List, Dict, Iterator, Optional
 from tqdm import tqdm
 
 from evaluation.dataset import BaseDataset
-from evaluation.tools.text_editor import TextEditor, TruncatePromptTextEditor
+from evaluation.tools.text_editor import TextEditor, TruncatePromptTextEditor, LLMParaphraser
 from evaluation.tools.text_quality_analyzer import TextQualityAnalyzer, LLMTextRater, ReferencedTextQualityAnalyzer, \
     DirectTextQualityAnalyzer, GPTTextRater
 from watermark.base import BaseWatermark
@@ -233,6 +233,13 @@ class EditingStage(PipelineStage):
 
         return edited_watermarked + edited_unwatermarked
 
+    # on join, close the servers
+    def join(self, timeout=None):
+        for editor in self.edit_sequences.values():
+            if isinstance(editor, LLMParaphraser):
+                editor.join()
+        super().join(timeout)
+
 
 class DetectionStage(PipelineStage):
     """Stage for detecting watermarks in texts"""
@@ -329,9 +336,9 @@ class RatingStage(PipelineStage):
             ratings = self.compute_ratings_multithreaded(batch)
             for i, response in enumerate(batch):
                 sample_ratings = {metric_name: scores[i] for metric_name, scores in ratings.items()}
-                original_ratings = response.ratings
-                original_ratings.update(sample_ratings)
-                rated_response = replace(response, ratings=original_ratings)
+                # original_ratings = response.ratings
+                # original_ratings.update(sample_ratings)
+                rated_response = replace(response, ratings=sample_ratings)
                 rated_responses.append(rated_response)
         return rated_responses
 
