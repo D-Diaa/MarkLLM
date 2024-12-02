@@ -3,6 +3,7 @@
 ## Overview
 
 This repository provides the implementation of our research work: **"Optimizing Adaptive Attacks Against Content Watermarks for Language Models"**. The goal is to evaluate and enhance the robustness of content watermarking methods used to distinguish machine-generated text from human-written text. Our approach leverages adaptive attacks to demonstrate vulnerabilities in existing watermarking methods.
+
 ![teaser](images/shresults.png)
 
 ## Key Highlights
@@ -21,16 +22,67 @@ This repository provides the implementation of our research work: **"Optimizing 
 
 ## Repository Contents
 
-- `src/`: Contains the main implementation files.
+- `MarkLLM/`: Parent module for training and evaluation.
+  - `src/`: Contains the main implementation files.
   - `MarkLLM/`: Core modules for training and evaluation.
 - `examples/`: Demonstrative examples to get started.
 - `experiments/`: Scripts and configurations for running our experiments.
+
+```plaintext
+MarkLLM/                        # Parent module for training and evaluation
+├── config/                     # Configuration files for various watermark algorithms       
+├── dataset/                    
+│   └── markmywords/            # Dataset used for our study
+├── evaluation/                 
+│   ├── dataset.py              
+│   ├── examples/               
+│   │   └── assess_overall.py   # Factory for creating watermark robustness evaluation pipelines
+│   ├── pipelines/              
+│   │   ├── detection.py
+│   │   ├── pipeline_stages.py  # i.e., from generation to detection
+│   │   ├── quality_analysis.py   
+│   │   └── robustness.py       # Pipeline for comprehensive watermark robustness evaluation
+│   └── tools/                  # Evaluation tools
+│       ├── oracle.py
+│       ├── success_rate_calculator.py  
+│       ├── text_editor.py       
+│       └── text_quality_analyzer.py   
+├── exceptions/                 
+├── font/                       
+├── MarkLLM_demo.ipynb          
+├── visualize/                  # Visualization Solutions module of MarkLLM
+├── scripts/                    # training and evaluating our adpative paraphrasers
+│   ├── average_results.py    
+│   ├── calculate_stats.py
+│   ├── dpo_train.py    
+│   ├── plots.py
+│   ├── preprocess_dpo.py    
+│   ├── runner.sh
+│   ├── tables.py    
+│   ├── token_frequency.py  
+│   └── trainer_runner.sh   
+├── test/                       # Test cases and examples for user testing
+│   ├── test_method.py    
+│   ├── test_pipeline.py  
+│   └── test_visualize.py   
+├── utils/                      # Helper classes and functions supporting various operations
+│   ├── openai_utils.py   
+│   ├── transformers_config.py 
+│   └── utils.py          
+├── visualize/                  # Visualization Solutions module of MarkLLM
+├── watermark/                  # Implementation framework for watermark algorithms
+│   ├── auto_watermark.py       # AutoWatermark class
+│   ├── base.py                 # Base classes and functions for watermarking             
+│   └── ...                     # Class implementation for major watermarks
+├── README.md                   # Main project documentation
+└── requirements.txt            # Dependencies required for the project
+```
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python >= 3.8
+- Python >= 3.9
 - PyTorch >= 1.11
 - Hugging Face Transformers Library
 
@@ -55,7 +107,7 @@ To reproduce our main results:
 
 Run the following command:
 ```bash
-python src/train.py --config configs/adaptive_attack.yaml
+<PLACEHOLDER> python src/train.py --config configs/adaptive_attack.yaml
 ```
 
 ## Evaluation
@@ -69,9 +121,6 @@ Our adaptive attacks outperform non-adaptive baselines in both evasion rates and
 ### Results and Visualization
 - The evasion rate versus text quality trade-off of all surveyed attacks when the provider uses a Llama3-70b model and the Exp (Aaronson & Kirchner, 2023) watermark.
   ![Exp-70B](images/qe_exp_70B-1.png)
-  
-- The evasion rate versus text quality trade-off of all surveyed attacks when the provider uses a Llama2-13b model and the Exp (Aaronson & Kirchner, 2023) watermark.
-  ![Exp-13B](images/qe_exp-1.png)
   
 - The evasion rate versus text quality trade-off of all surveyed attacks when the provider uses a Llama2-13b model and the Dist-Shift/KGW (Kirchenbauer et. al, 2023) watermark.
   ![Exp-13B](images/qe_ds-1.png)
