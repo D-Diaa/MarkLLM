@@ -22,12 +22,6 @@ This repository provides the implementation of our research work: **"Optimizing 
 
 ## Repository Contents
 
-- `MarkLLM/`: Parent module for training and evaluation.
-  - `src/`: Contains the main implementation files.
-  - `MarkLLM/`: Core modules for training and evaluation.
-- `examples/`: Demonstrative examples to get started.
-- `experiments/`: Scripts and configurations for running our experiments.
-
 ```plaintext
 MarkLLM/                        # Parent module for training and evaluation
 ├── config/                     # Configuration files for various watermark algorithms       
