@@ -101,7 +101,14 @@ To reproduce our main results:
 
 Run the following command:
 ```bash
-<PLACEHOLDER> python src/train.py --config configs/adaptive_attack.yaml
+cd /scripts/
+sh trainer_runner.sh
+```
+
+To evaluate:
+```bash
+cd /scripts/
+sh runner.sh
 ```
 
 ## Evaluation
